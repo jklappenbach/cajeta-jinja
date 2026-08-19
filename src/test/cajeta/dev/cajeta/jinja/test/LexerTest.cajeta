@@ -1,0 +1,103 @@
+package dev.cajeta.jinja.test;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.jinja.Lexer;
+import dev.cajeta.jinja.Tok;
+import dev.cajeta.jinja.JinjaException;
+import cajeta.lang.String;
+
+/**
+ * cajeta-jinja plan Unit 2 TDD — the token stream itself.
+ *
+ * 2.1.1: the three delimiters tokenize, INCLUDING inside string
+ * literals containing them (a `"}}"` in an expression must not close
+ * the tag — the quote-aware close scan).
+ * 2.1.6: a lexing error reports line AND column.
+ */
+public class LexerTest {
+
+    public LexerTest() { return; }
+
+    /** 2.1.1 — `{{ "}}" }}` is VAR_OPEN, STRING("}}"), VAR_CLOSE: the
+     *  delimiter inside the literal never closes the tag. Same for a
+     *  `%}` inside a statement-tag string. */
+    @Test
+    public void delimiterInsideStringLiteralDoesNotClose() {
+        Lexer lx = heap Lexer("a{{ \"}}\" }}b", false, false);
+        Tok t = lx.tokenize();
+        // TEXT("a") VAR_OPEN STRING VAR_CLOSE TEXT("b") EOF
+        Assert.equals((int64) 6, (int64) t.n);
+        Assert.isTrue(t.kind[0] == Tok.K_TEXT);
+        Assert.isTrue(t.kind[1] == Tok.K_VAR_OPEN);
+        Assert.isTrue(t.kind[2] == Tok.K_STRING);
+        String lit #= t.spanText(2);
+        Assert.isTrue(lit.equals("}}"));
+        Assert.isTrue(t.kind[3] == Tok.K_VAR_CLOSE);
+        Assert.isTrue(t.kind[4] == Tok.K_TEXT);
+        Assert.isTrue(t.kind[5] == Tok.K_EOF);
+
+        Lexer lx2 = heap Lexer("{% set x = '%}' %}", false, false);
+        Tok t2 = lx2.tokenize();
+        // STMT_OPEN NAME(set) NAME(x) ASSIGN STRING(%}) STMT_CLOSE EOF
+        Assert.equals((int64) 7, (int64) t2.n);
+        Assert.isTrue(t2.kind[4] == Tok.K_STRING);
+        String lit2 #= t2.spanText(4);
+        Assert.isTrue(lit2.equals("%}"));
+    }
+
+    /** Comment tags produce NO tokens; their text vanishes. */
+    @Test
+    public void commentsVanishFromTheStream() {
+        Lexer lx = heap Lexer("x{# gone #}y", false, false);
+        Tok t = lx.tokenize();
+        // TEXT("x") TEXT("y") EOF — two text runs, the tag between them
+        Assert.equals((int64) 3, (int64) t.n);
+        Assert.isTrue(t.kind[0] == Tok.K_TEXT);
+        String a #= t.spanText(0);
+        Assert.isTrue(a.equals("x"));
+        Assert.isTrue(t.kind[1] == Tok.K_TEXT);
+        String b #= t.spanText(1);
+        Assert.isTrue(b.equals("y"));
+    }
+
+    /** Operators tokenize with the two-byte forms winning (`==`, `!=`,
+     *  `<=`, `>=`, `**`, `//`). */
+    @Test
+    public void twoByteOperatorsWin() {
+        Lexer lx = heap Lexer("{{ a == b ** 2 // 3 }}", false, false);
+        Tok t = lx.tokenize();
+        // VAR_OPEN NAME EQ NAME DSTAR NUMBER DSLASH NUMBER VAR_CLOSE EOF
+        Assert.equals((int64) 10, (int64) t.n);
+        Assert.isTrue(t.kind[2] == Tok.K_EQ);
+        Assert.isTrue(t.kind[4] == Tok.K_DSTAR);
+        Assert.isTrue(t.kind[6] == Tok.K_DSLASH);
+    }
+
+    /** 2.1.6 — an unterminated tag reports its LINE; a bad byte inside
+     *  a tag reports line AND column. */
+    @Test
+    public void errorsCarryLineAndColumn() {
+        boolean threw = false;
+        Lexer lx = heap Lexer("one\ntwo {{ broken", false, false);
+        try {
+            Tok t = lx.tokenize();
+            Assert.isTrue(t == null);   // unreachable
+        } catch (JinjaException e) {
+            threw = true;
+            Assert.equals((int64) 2, (int64) e.line);
+        }
+        Assert.isTrue(threw);
+
+        boolean threw2 = false;
+        Lexer lx2 = heap Lexer("line1\n{{ a ; b }}", false, false);
+        try {
+            Tok t2 = lx2.tokenize();
+            Assert.isTrue(t2 == null);  // unreachable
+        } catch (JinjaException e2) {
+            threw2 = true;
+            Assert.equals((int64) 2, (int64) e2.line);
+            Assert.isTrue(e2.column > 0);
+        }
+        Assert.isTrue(threw2);
+    }
+}

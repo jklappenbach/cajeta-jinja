@@ -1,0 +1,367 @@
+package dev.cajeta.jinja;
+
+import cajeta.lang.String;
+
+/**
+ * The Jinja lexer (plan 2.2.2): one pass over the template bytes,
+ * producing a flat `Tok` stream. Text between tags is emitted with the
+ * whitespace contract already applied (spec 2.13/2.14):
+ *
+ *   - `lstrip_blocks`: horizontal whitespace from line start to a `{%`
+ *     or `{#` tag is removed. Never applies to `{{`.
+ *   - `trim_blocks`: ONE newline immediately after a `%}` / `#}` is
+ *     removed. Never applies to `}}`.
+ *   - Explicit `-` (`{%-`, `-%}`, `{{-`, `-}}`, `{#-`, `-#}`) strips
+ *     ALL adjacent whitespace including newlines and OVERRIDES the two
+ *     settings; explicit `+` (`{%+`, `+%}`) disables them for that one
+ *     tag edge.
+ *
+ * Comments are consumed here — they produce no tokens, only their
+ * whitespace effects. Inside `{{ }}` / `{% %}` the lexer tokenizes
+ * names, numbers, strings (unescaped, quote/backslash-aware so a
+ * delimiter INSIDE a string literal never closes the tag — spec 2.1.1),
+ * and the operator set of grammar/Jinja.g4.
+ *
+ * Errors are JinjaException with 1-based line AND column (spec 5.3).
+ * Adapted from cajeta-llama's TplParser scanner, generalized from the
+ * hardcoded transformers whitespace mode to all four.
+ */
+public final class Lexer {
+
+    int8[] src;
+    int32 len;
+    int32 pos;
+    int32 line;
+    int32 lineStart;       // pos of the current line's first byte (column = pos - lineStart + 1)
+    boolean trimBlocks;
+    boolean lstripBlocks;
+    boolean stripNextWs;   // set by a trailing `-`: eat ALL following ws
+
+    Tok t;
+    Buf text;              // pending TEXT bytes (strip surgeries apply here)
+    int32 textLine;        // line the pending text began on
+
+    public Lexer(String source, boolean trimBlocks, boolean lstripBlocks) {
+        this.src #= source.toBytes();
+        this.len = source.byteLength();
+        this.pos = 0;
+        this.line = 1;
+        this.lineStart = 0;
+        this.trimBlocks = trimBlocks;
+        this.lstripBlocks = lstripBlocks;
+        this.stripNextWs = false;
+        this.t = heap Tok();
+        this.text = heap Buf();
+        this.textLine = 1;
+    }
+
+    int32 at(int32 i) {
+        if (i < 0 || i >= this.len) {
+            return 0 - 1;
+        }
+        return ((int32) this.src[i]) & 255;
+    }
+
+    int32 col() {
+        return this.pos - this.lineStart + 1;
+    }
+
+    boolean isWs(int32 c) {
+        return c == 32 || c == 9 || c == 10 || c == 13;
+    }
+
+    void newline() {
+        this.line = this.line + 1;
+        this.lineStart = this.pos + 1;
+    }
+
+    /** Flush pending text as a TEXT token (if any bytes survived). */
+    void flushText() {
+        if (this.text.n == 0) {
+            return;
+        }
+        int32 start = this.t.bytes.n;
+        int32 i = 0;
+        while (i < this.text.n) {
+            this.t.bytes.addByte(((int32) this.text.b[i]) & 255);
+            i = i + 1;
+        }
+        int32 tok = this.t.add(Tok.K_TEXT, this.textLine);
+        this.t.setSpan(tok, start, this.text.n);
+        this.text.n = 0;
+    }
+
+    /** Tokenize the whole template. Returns the stream (borrow of this
+     *  lexer's arrays; the caller's Template owns the lexer). */
+    public Tok tokenize() {
+        while (this.pos < this.len) {
+            int32 c0 = this.at(this.pos);
+            int32 c1 = this.at(this.pos + 1);
+            int32 tagKind = 0;                    // 1={{ 2={% 3={#
+            if (c0 == 123 && c1 == 123) { tagKind = 1; }
+            else if (c0 == 123 && c1 == 37) { tagKind = 2; }
+            else if (c0 == 123 && c1 == 35) { tagKind = 3; }
+
+            if (tagKind == 0) {
+                if (this.stripNextWs && this.isWs(c0)) {
+                    if (c0 == 10) { this.newline(); }
+                    this.pos = this.pos + 1;
+                    continue;
+                }
+                this.stripNextWs = false;
+                if (this.text.n == 0) {
+                    this.textLine = this.line;
+                }
+                if (c0 == 10) { this.newline(); }
+                this.text.addByte(c0);
+                this.pos = this.pos + 1;
+                continue;
+            }
+            this.stripNextWs = false;
+
+            // ---- whitespace control BEFORE the tag -------------------
+            int32 c2 = this.at(this.pos + 2);
+            boolean explicitTrim = c2 == 45;      // '-'
+            boolean explicitKeep = c2 == 43;      // '+'
+            if (explicitTrim) {
+                this.text.rstripAll();
+            } else if (tagKind != 1 && !explicitKeep && this.lstripBlocks) {
+                this.text.lstripToLine();
+            }
+
+            int32 openLine = this.line;
+            int32 bodyStart = this.pos + 2;
+            if (explicitTrim || explicitKeep) {
+                bodyStart = bodyStart + 1;
+            }
+
+            // ---- find the close, quote-aware -------------------------
+            int32 closeWant = 37;                 // '%'
+            if (tagKind == 1) { closeWant = 125; }  // '}'
+            if (tagKind == 3) { closeWant = 35; }   // '#'
+            int32 close = this.findClose(bodyStart, tagKind, closeWant);
+            int32 bodyEnd = close;
+            boolean trimAfter = false;
+            boolean keepAfter = false;
+            int32 beforeClose = this.at(close - 1);
+            if (close > bodyStart && beforeClose == 45) {
+                trimAfter = true;
+                bodyEnd = close - 1;
+            } else if (close > bodyStart && beforeClose == 43) {
+                keepAfter = true;
+                bodyEnd = close - 1;
+            }
+
+            // ---- emit ------------------------------------------------
+            this.flushText();
+            if (tagKind == 1) {
+                this.t.add(Tok.K_VAR_OPEN, openLine);
+                this.lexTagBody(bodyStart, bodyEnd);
+                this.t.add(Tok.K_VAR_CLOSE, this.line);
+            } else if (tagKind == 2) {
+                this.t.add(Tok.K_STMT_OPEN, openLine);
+                this.lexTagBody(bodyStart, bodyEnd);
+                this.t.add(Tok.K_STMT_CLOSE, this.line);
+            } else {
+                // comment: no tokens, but line accounting must advance
+                int32 k = bodyStart;
+                while (k < close) {
+                    if (this.at(k) == 10) {
+                        this.line = this.line + 1;
+                    }
+                    k = k + 1;
+                }
+            }
+
+            this.pos = close + 2;
+
+            // ---- whitespace control AFTER the tag --------------------
+            if (trimAfter) {
+                this.stripNextWs = true;
+            } else if (tagKind != 1 && !keepAfter && this.trimBlocks) {
+                if (this.at(this.pos) == 13 && this.at(this.pos + 1) == 10) {
+                    this.pos = this.pos + 2;
+                    this.newline();
+                } else if (this.at(this.pos) == 10) {
+                    this.pos = this.pos + 1;
+                    this.newline();
+                }
+            }
+        }
+        this.flushText();
+        this.t.add(Tok.K_EOF, this.line);
+        return this.t;
+    }
+
+    /** Quote-aware scan for the tag close (`%}`, `}}`, `#}`): a
+     *  delimiter inside a string literal never closes the tag. */
+    int32 findClose(int32 from, int32 tagKind, int32 want) {
+        int32 i = from;
+        boolean inStr = false;
+        int32 quote = 0;
+        while (i < this.len) {
+            int32 c = this.at(i);
+            if (inStr) {
+                if (c == 92) {                    // backslash
+                    i = i + 2;
+                    continue;
+                }
+                if (c == quote) {
+                    inStr = false;
+                }
+                i = i + 1;
+                continue;
+            }
+            if (tagKind != 3 && (c == 34 || c == 39)) {
+                inStr = true;
+                quote = c;
+                i = i + 1;
+                continue;
+            }
+            if (c == want && this.at(i + 1) == 125) {
+                return i;
+            }
+            i = i + 1;
+        }
+        throw heap JinjaException(
+            "unterminated tag opened at line " + this.line, this.line,
+            this.col());
+    }
+
+    /** Tokenize a tag body: names, numbers, strings, operators. */
+    void lexTagBody(int32 from, int32 to) {
+        int32 i = from;
+        while (i < to) {
+            int32 c = this.at(i);
+            if (c == 10) {
+                this.line = this.line + 1;
+                this.lineStart = i + 1;
+                i = i + 1;
+                continue;
+            }
+            if (c == 32 || c == 9 || c == 13) {
+                i = i + 1;
+                continue;
+            }
+            // NAME
+            if ((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95) {
+                int32 s = i;
+                while (i < to) {
+                    int32 d = this.at(i);
+                    if ((d >= 97 && d <= 122) || (d >= 65 && d <= 90)
+                            || (d >= 48 && d <= 57) || d == 95) {
+                        i = i + 1;
+                    } else {
+                        break;
+                    }
+                }
+                this.copySpan(Tok.K_NAME, s, i);
+                continue;
+            }
+            // NUMBER (integer or dotted float; sign is an operator)
+            if (c >= 48 && c <= 57) {
+                int32 s = i;
+                while (i < to && this.at(i) >= 48 && this.at(i) <= 57) {
+                    i = i + 1;
+                }
+                if (this.at(i) == 46 && this.at(i + 1) >= 48
+                        && this.at(i + 1) <= 57) {
+                    i = i + 1;
+                    while (i < to && this.at(i) >= 48 && this.at(i) <= 57) {
+                        i = i + 1;
+                    }
+                }
+                this.copySpan(Tok.K_NUMBER, s, i);
+                continue;
+            }
+            // STRING — unescape into the token byte pool
+            if (c == 34 || c == 39) {
+                int32 quote = c;
+                int32 start = this.t.bytes.n;
+                int32 sLine = this.line;
+                i = i + 1;
+                boolean closed = false;
+                while (i < to) {
+                    int32 d = this.at(i);
+                    if (d == quote) {
+                        closed = true;
+                        i = i + 1;
+                        break;
+                    }
+                    if (d == 92) {                // backslash escapes
+                        int32 e = this.at(i + 1);
+                        if (e == 110) { this.t.bytes.addByte(10); }      // \n
+                        else if (e == 116) { this.t.bytes.addByte(9); }  // \t
+                        else if (e == 114) { this.t.bytes.addByte(13); } // \r
+                        else { this.t.bytes.addByte(e); }  // \\ \' \" etc.
+                        i = i + 2;
+                        continue;
+                    }
+                    if (d == 10) {
+                        this.line = this.line + 1;
+                        this.lineStart = i + 1;
+                    }
+                    this.t.bytes.addByte(d);
+                    i = i + 1;
+                }
+                if (!closed) {
+                    throw heap JinjaException(
+                        "unterminated string literal at line " + sLine,
+                        sLine, 0);
+                }
+                int32 tok = this.t.add(Tok.K_STRING, sLine);
+                this.t.setSpan(tok, start, this.t.bytes.n - start);
+                continue;
+            }
+            // operators / punctuation
+            int32 d1 = this.at(i + 1);
+            int32 kind = 0 - 1;
+            int32 adv = 1;
+            if (c == 61 && d1 == 61) { kind = Tok.K_EQ; adv = 2; }
+            else if (c == 33 && d1 == 61) { kind = Tok.K_NE; adv = 2; }
+            else if (c == 60 && d1 == 61) { kind = Tok.K_LE; adv = 2; }
+            else if (c == 62 && d1 == 61) { kind = Tok.K_GE; adv = 2; }
+            else if (c == 42 && d1 == 42) { kind = Tok.K_DSTAR; adv = 2; }
+            else if (c == 47 && d1 == 47) { kind = Tok.K_DSLASH; adv = 2; }
+            else if (c == 61) { kind = Tok.K_ASSIGN; }
+            else if (c == 60) { kind = Tok.K_LT; }
+            else if (c == 62) { kind = Tok.K_GT; }
+            else if (c == 40) { kind = Tok.K_LPAREN; }
+            else if (c == 41) { kind = Tok.K_RPAREN; }
+            else if (c == 91) { kind = Tok.K_LBRACKET; }
+            else if (c == 93) { kind = Tok.K_RBRACKET; }
+            else if (c == 123) { kind = Tok.K_LBRACE; }
+            else if (c == 125) { kind = Tok.K_RBRACE; }
+            else if (c == 44) { kind = Tok.K_COMMA; }
+            else if (c == 58) { kind = Tok.K_COLON; }
+            else if (c == 46) { kind = Tok.K_DOT; }
+            else if (c == 124) { kind = Tok.K_PIPE; }
+            else if (c == 126) { kind = Tok.K_TILDE; }
+            else if (c == 43) { kind = Tok.K_PLUS; }
+            else if (c == 45) { kind = Tok.K_MINUS; }
+            else if (c == 42) { kind = Tok.K_STAR; }
+            else if (c == 47) { kind = Tok.K_SLASH; }
+            else if (c == 37) { kind = Tok.K_PERCENT; }
+            if (kind < 0) {
+                throw heap JinjaException(
+                    "unexpected character (byte " + c + ") in tag at line "
+                    + this.line + ", column " + (i - this.lineStart + 1),
+                    this.line, i - this.lineStart + 1);
+            }
+            this.t.add(kind, this.line);
+            i = i + adv;
+        }
+    }
+
+    /** Copy src[s..e) into the token byte pool as one token. */
+    void copySpan(int32 kind, int32 s, int32 e) {
+        int32 start = this.t.bytes.n;
+        int32 i = s;
+        while (i < e) {
+            this.t.bytes.addByte(this.at(i));
+            i = i + 1;
+        }
+        int32 tok = this.t.add(kind, this.line);
+        this.t.setSpan(tok, start, e - s);
+    }
+}

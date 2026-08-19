@@ -4,7 +4,9 @@ import dev.cajeta.unit.Assert;
 import dev.cajeta.jinja.Environment;
 import dev.cajeta.jinja.Template;
 import dev.cajeta.jinja.JinjaException;
+import cajeta.codec.json.Json;
 import cajeta.codec.json.JsonValue;
+import cajeta.codec.json.JsonObject;
 import cajeta.io.file.File;
 import cajeta.lang.String;
 
@@ -38,9 +40,34 @@ public class HarnessTest {
      * and a +/-16-byte window of both sides, control bytes escaped —
      * readable for whitespace diffs.
      */
-    static void renderAndCompare(String fixture, Environment env) {
+    /** Build the Environment from the fixture's settings.json — the
+     *  SAME file the generator fed to Jinja2, so the two sides can
+     *  never drift. Missing file = all defaults. */
+    static #Environment envFor(String base) {
+        Environment env = heap Environment();
+        int8[] raw #= File.readAllBytes(base + "/settings.json");
+        JsonValue v #= Json.parse(raw, (int64) raw.count());
+        JsonObject o = v.object();
+        if (o == null) {
+            return #= env;
+        }
+        JsonValue f = o.get("trim_blocks");
+        if (f != null) { env.trimBlocks(f.asBoolean()); }
+        f = o.get("lstrip_blocks");
+        if (f != null) { env.lstripBlocks(f.asBoolean()); }
+        f = o.get("autoescape");
+        if (f != null) { env.autoescape(f.asBoolean()); }
+        f = o.get("strict_undefined");
+        if (f != null) { env.strictUndefined(f.asBoolean()); }
+        f = o.get("now_epoch_seconds");
+        if (f != null) { env.nowEpochSeconds(f.asInt64()); }
+        return #= env;
+    }
+
+    static void renderAndCompare(String fixture) {
         String root #= HarnessTest.fixtureRoot();
         String base = root + "/" + fixture;
+        Environment env #= HarnessTest.envFor(base);
         int8[] tplBytes #= File.readAllBytes(base + "/template.j2");
         String tpl #= heap String(#tplBytes, (int32) tplBytes.count());
         int8[] want #= File.readAllBytes(base + "/expected.out");
@@ -130,8 +157,7 @@ public class HarnessTest {
      *  match it. */
     @Test
     public void trivialLiteralRendersByteExact() {
-        HarnessTest.renderAndCompare("literal-passthrough",
-            heap Environment());
+        HarnessTest.renderAndCompare("literal-passthrough");
     }
 
     /** Spec 2.22 discipline from day one: a construct the engine cannot
@@ -152,5 +178,32 @@ public class HarnessTest {
             Assert.isTrue(e.line == 2);
         }
         Assert.isTrue(threw);
+    }
+
+    /** 2.1.2/2.1.3 (defaults): comment tags with BOTH flags off — the
+     *  Jinja default; every newline and indent survives except where
+     *  explicit dashes strip. */
+    @Test
+    public void whitespaceDefaultsMatch() {
+        HarnessTest.renderAndCompare("ws-default");
+    }
+
+    /** 2.1.2: trim_blocks alone. */
+    @Test
+    public void whitespaceTrimBlocksMatches() {
+        HarnessTest.renderAndCompare("ws-trim");
+    }
+
+    /** 2.1.3: lstrip_blocks alone. */
+    @Test
+    public void whitespaceLstripBlocksMatches() {
+        HarnessTest.renderAndCompare("ws-lstrip");
+    }
+
+    /** 2.1.5: the transformers combination (both on) — the chat-template
+     *  environment. Includes 2.1.4's explicit dashes overriding it. */
+    @Test
+    public void whitespaceTransformersComboMatches() {
+        HarnessTest.renderAndCompare("ws-both");
     }
 }
