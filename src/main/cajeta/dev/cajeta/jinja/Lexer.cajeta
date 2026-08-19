@@ -40,6 +40,7 @@ public final class Lexer {
     Tok t;
     Buf text;              // pending TEXT bytes (strip surgeries apply here)
     int32 textLine;        // line the pending text began on
+    int32 textCol;         // column the pending text began at
 
     public Lexer(String source, boolean trimBlocks, boolean lstripBlocks) {
         this.src #= source.toBytes();
@@ -53,6 +54,7 @@ public final class Lexer {
         this.t = heap Tok();
         this.text = heap Buf();
         this.textLine = 1;
+        this.textCol = 1;
     }
 
     int32 at(int32 i) {
@@ -86,7 +88,7 @@ public final class Lexer {
             this.t.bytes.addByte(((int32) this.text.b[i]) & 255);
             i = i + 1;
         }
-        int32 tok = this.t.add(Tok.K_TEXT, this.textLine);
+        int32 tok = this.t.add(Tok.K_TEXT, this.textLine, this.textCol);
         this.t.setSpan(tok, start, this.text.n);
         this.text.n = 0;
     }
@@ -111,6 +113,7 @@ public final class Lexer {
                 this.stripNextWs = false;
                 if (this.text.n == 0) {
                     this.textLine = this.line;
+                    this.textCol = this.col();
                 }
                 if (c0 == 10) { this.newline(); }
                 this.text.addByte(c0);
@@ -130,6 +133,7 @@ public final class Lexer {
             }
 
             int32 openLine = this.line;
+            int32 openCol = this.col();
             int32 bodyStart = this.pos + 2;
             if (explicitTrim || explicitKeep) {
                 bodyStart = bodyStart + 1;
@@ -155,13 +159,15 @@ public final class Lexer {
             // ---- emit ------------------------------------------------
             this.flushText();
             if (tagKind == 1) {
-                this.t.add(Tok.K_VAR_OPEN, openLine);
+                this.t.add(Tok.K_VAR_OPEN, openLine, openCol);
                 this.lexTagBody(bodyStart, bodyEnd);
-                this.t.add(Tok.K_VAR_CLOSE, this.line);
+                this.t.add(Tok.K_VAR_CLOSE, this.line,
+                    close - this.lineStart + 1);
             } else if (tagKind == 2) {
-                this.t.add(Tok.K_STMT_OPEN, openLine);
+                this.t.add(Tok.K_STMT_OPEN, openLine, openCol);
                 this.lexTagBody(bodyStart, bodyEnd);
-                this.t.add(Tok.K_STMT_CLOSE, this.line);
+                this.t.add(Tok.K_STMT_CLOSE, this.line,
+                    close - this.lineStart + 1);
             } else {
                 // comment: no tokens, but line accounting must advance
                 int32 k = bodyStart;
@@ -189,7 +195,7 @@ public final class Lexer {
             }
         }
         this.flushText();
-        this.t.add(Tok.K_EOF, this.line);
+        this.t.add(Tok.K_EOF, this.line, this.len - this.lineStart + 1);
         return this.t;
     }
 
@@ -279,6 +285,7 @@ public final class Lexer {
                 int32 quote = c;
                 int32 start = this.t.bytes.n;
                 int32 sLine = this.line;
+                int32 sCol = i - this.lineStart + 1;
                 i = i + 1;
                 boolean closed = false;
                 while (i < to) {
@@ -309,7 +316,7 @@ public final class Lexer {
                         "unterminated string literal at line " + sLine,
                         sLine, 0);
                 }
-                int32 tok = this.t.add(Tok.K_STRING, sLine);
+                int32 tok = this.t.add(Tok.K_STRING, sLine, sCol);
                 this.t.setSpan(tok, start, this.t.bytes.n - start);
                 continue;
             }
@@ -348,7 +355,7 @@ public final class Lexer {
                     + this.line + ", column " + (i - this.lineStart + 1),
                     this.line, i - this.lineStart + 1);
             }
-            this.t.add(kind, this.line);
+            this.t.add(kind, this.line, i - this.lineStart + 1);
             i = i + adv;
         }
     }
@@ -361,7 +368,7 @@ public final class Lexer {
             this.t.bytes.addByte(this.at(i));
             i = i + 1;
         }
-        int32 tok = this.t.add(kind, this.line);
+        int32 tok = this.t.add(kind, this.line, s - this.lineStart + 1);
         this.t.setSpan(tok, start, e - s);
     }
 }

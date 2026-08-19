@@ -1,0 +1,179 @@
+package dev.cajeta.jinja.test;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.jinja.Environment;
+import dev.cajeta.jinja.Template;
+import dev.cajeta.jinja.JinjaException;
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonValue;
+import cajeta.lang.String;
+
+/**
+ * cajeta-jinja plan Unit 3 TDD — expressions.
+ *
+ * 3.1.1: operator precedence matches Jinja across the full table —
+ * including Jinja's DELIBERATE divergences from Python (left-assoc
+ * `**`, unary minus tighter than `**`, `~` between +/- and *, chained
+ * comparisons, `is` at postfix level). The fixtures are oracle-
+ * generated, so every expectation below is real Jinja2 3.1.6 output.
+ * 3.1.2: indexing, slicing, attributes, method calls.
+ * 3.1.3: list/dict literals and keyword arguments.
+ * 3.1.4: undefined vs none under default AND strict behaviours.
+ * 3.1.5: values stored in scopes OWN their bytes (spec 3.2).
+ */
+public class ExprTest {
+
+    public ExprTest() { return; }
+
+    /** 3.1.1 — arithmetic/concat precedence torture, ints and floats. */
+    @Test
+    public void arithmeticPrecedenceMatches() {
+        HarnessTest.renderAndCompare("expr-arith");
+    }
+
+    /** 3.1.1 — boolean logic, comparison CHAINS, in/not in, inline if. */
+    @Test
+    public void logicAndComparisonsMatch() {
+        HarnessTest.renderAndCompare("expr-logic");
+    }
+
+    /** 3.1.2 — index, slice (negative/open/stepped), attr, methods. */
+    @Test
+    public void postfixOperationsMatch() {
+        HarnessTest.renderAndCompare("expr-postfix");
+    }
+
+    /** 3.1.3 — list/dict literals, dict() kwargs, range(). */
+    @Test
+    public void literalsAndKwargsMatch() {
+        HarnessTest.renderAndCompare("expr-literals");
+    }
+
+    /** 3.1.4 — default-undefined: prints empty, is-defined False,
+     *  lenient ==/in/~/bool; none is a VALUE and is defined. */
+    @Test
+    public void undefinedDefaultBehaviourMatches() {
+        HarnessTest.renderAndCompare("expr-undefined");
+    }
+
+    /** 3.3.1 — everything at once. */
+    @Test
+    public void expressionTortureMatches() {
+        HarnessTest.renderAndCompare("expr-torture");
+    }
+
+    static boolean rendersWithError(Environment env, String tpl) {
+        JsonValue ctx #= Json.parse("{}");
+        boolean threw = false;
+        try {
+            Template t #= env.compile(tpl);
+            String out #= t.render(ctx);
+            threw = out == null;             // never — keeps `out` live
+        } catch (JinjaException e) {
+            threw = true;
+        }
+        return threw;
+    }
+
+    /** 3.1.4 — strict mode: READING undefined is an error... */
+    @Test
+    public void strictUndefinedRaises() {
+        Environment env = heap Environment();
+        env.strictUndefined(true);
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ missing }}"));
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ missing ~ 'x' }}"));
+
+        // ...but `is defined` / `is undefined` never count as a read.
+        JsonValue ctx #= Json.parse("{}");
+        Template t #= env.compile("{{ missing is defined }}");
+        String out #= t.render(ctx);
+        Assert.isTrue(out.equals("False"));
+    }
+
+    /** Jinja raises on HARD uses of undefined even in default mode:
+     *  attribute/index access, arithmetic, ordering comparisons
+     *  (oracle-verified against 3.1.6). */
+    @Test
+    public void undefinedHardUsesRaiseInDefaultMode() {
+        Environment env = heap Environment();
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ missing.deep }}"));
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ missing['k'] }}"));
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ missing + 1 }}"));
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ missing < 1 }}"));
+    }
+
+    /** Division and modulo by zero fail loudly with the line. */
+    @Test
+    public void divisionByZeroFails() {
+        Environment env = heap Environment();
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ 1 / 0 }}"));
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ 1 // 0 }}"));
+        Assert.isTrue(ExprTest.rendersWithError(env, "{{ 1 % 0 }}"));
+    }
+
+    /** A parse error carries line AND column (spec 5.3) and arrives at
+     *  COMPILE time — a Template that constructed successfully cannot
+     *  fail to parse later. */
+    @Test
+    public void parseErrorsSurfaceAtCompileTime() {
+        Environment env = heap Environment();
+        boolean threw = false;
+        try {
+            Template t #= env.compile("ok\n{{ 1 + }}");
+            threw = t == null;               // never
+        } catch (JinjaException e) {
+            threw = true;
+            Assert.equals((int64) 2, (int64) e.line);
+            Assert.isTrue(e.column > 0);
+        }
+        Assert.isTrue(threw);
+    }
+
+    /** One compiled template, two contexts — no state bleed. */
+    @Test
+    public void compiledTemplateRendersRepeatedly() {
+        Environment env = heap Environment();
+        Template t #= env.compile("{{ who ~ '/' ~ n * 2 }}");
+        JsonValue a #= Json.parse("{\"who\": \"ada\", \"n\": 3}");
+        JsonValue b #= Json.parse("{\"who\": \"bob\", \"n\": 5}");
+        String r1 #= t.render(a);
+        String r2 #= t.render(b);
+        String r3 #= t.render(a);
+        Assert.isTrue(r1.equals("ada/6"));
+        Assert.isTrue(r2.equals("bob/10"));
+        Assert.isTrue(r3.equals("ada/6"));
+    }
+
+    /** Helper for the ownership canary: everything — source text,
+     *  context, environment — is built from temporaries that die when
+     *  this frame returns. Payloads exceed String's 24-byte SSO region
+     *  so a borrow would point into freed heap, not an inline copy. */
+    static #String renderFromTemporaries() {
+        String name = "" + "abcdefghijklmnopqrstuvwxyz0123456789";
+        String src = "" + "{{ {'k': user.tag ~ '!'}['k'] }}|{{ user.tag[3:] }}";
+        Environment env = heap Environment();
+        Template t #= env.compile(src);
+        String ctxText = "{\"user\": {\"tag\": \"" + name + "\"}}";
+        JsonValue ctx #= Json.parse(ctxText);
+        return #t.render(ctx);
+    }
+
+    /** 3.1.5 — values stored in scopes own their bytes: the render
+     *  result is built from context strings, dict-literal stores, and
+     *  concat temporaries that are all dead by the time we look, and
+     *  heavy allocator churn must not be able to rewrite it. */
+    @Test
+    public void scopeValuesOwnTheirBytes() {
+        String got #= ExprTest.renderFromTemporaries();
+        // Churn both the String size class and small byte arrays.
+        int32 i = 0;
+        while (i < 8) {
+            String junk = "" + "JUNKJUNKJUNKJUNKJUNKJUNKJUNKJUNKJUNK" + i;
+            int8[] noise = heap int8[32];
+            noise[0] = (int8) junk.byteLength();
+            i = i + 1;
+        }
+        Assert.isTrue(got.equals(
+            "abcdefghijklmnopqrstuvwxyz0123456789!|defghijklmnopqrstuvwxyz0123456789"));
+    }
+}

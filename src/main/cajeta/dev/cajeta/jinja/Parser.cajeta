@@ -1,0 +1,599 @@
+package dev.cajeta.jinja;
+
+import cajeta.lang.String;
+
+/**
+ * Hand-written recursive-descent parser over the `Tok` stream,
+ * implementing `grammar/Jinja.g4` (the normative contract — see its
+ * header for why there is no generated parser).
+ *
+ * The precedence chain is JINJA2's, verified against the pinned 3.1.6
+ * parser — NOT Python's: `**` is left-associative, unary minus binds
+ * tighter than `**`, `~` sits between +/- and *, comparisons CHAIN
+ * (`1 < 2 < 3`), and `is` tests bind at postfix level. Getting any of
+ * these "obviously right" (i.e. Python's way) is a byte diff the
+ * oracle fixtures catch.
+ *
+ * UNIT 3 SCOPE: text, `{{ expr }}` output, and the full expression
+ * grammar. Statement tags fail loudly naming keyword and line
+ * (spec 2.22); Unit 4 replaces that rejection with parseStatement.
+ *
+ * Errors are compile-time JinjaException with line AND column
+ * (spec 5.3) — a Template that constructed successfully cannot fail to
+ * parse later.
+ */
+final class Parser {
+
+    // `tk` is a VIEW (§2.2): parse() wires it in and the Parser dies
+    // inside that call — not a constructor formal, for the same
+    // CAPTURED_BORROW_PARAM reason documented on Eval.
+    Tok tk;
+    Node nd;
+    int32 p;               // token cursor
+
+    Parser() {
+        this.tk = null;
+        this.nd = null;
+        this.p = 0;
+    }
+
+    /** Parse the whole token stream into an owned node table. */
+    static #Node parse(Tok tokens) {
+        Parser ps = heap Parser();
+        ps.tk = tokens;
+        ps.nd = heap Node(tokens.n + 16);
+        ps.nd.root = ps.parseTemplate();
+        return #ps.nd;
+    }
+
+    // ── cursor helpers ─────────────────────────────────────────────────
+
+    int32 kindAt(int32 i) {
+        if (i >= this.tk.n) {
+            return Tok.K_EOF;
+        }
+        return this.tk.kind[i];
+    }
+
+    int32 cur() {
+        return this.kindAt(this.p);
+    }
+
+    int32 curLine() {
+        if (this.p >= this.tk.n) {
+            return this.tk.line[this.tk.n - 1];
+        }
+        return this.tk.line[this.p];
+    }
+
+    int32 curCol() {
+        if (this.p >= this.tk.n) {
+            return this.tk.col[this.tk.n - 1];
+        }
+        return this.tk.col[this.p];
+    }
+
+    /** Does token `i` (a NAME) spell exactly `w`? No allocation. */
+    boolean wordIs(int32 i, String w) {
+        if (this.kindAt(i) != Tok.K_NAME) {
+            return false;
+        }
+        int32 m = w.byteLength();
+        if (this.tk.b[i] != m) {
+            return false;
+        }
+        int32 s = this.tk.a[i];
+        int32 j = 0;
+        while (j < m) {
+            if ((((int32) this.tk.bytes.b[s + j]) & 255) != w.byteAt(j)) {
+                return false;
+            }
+            j = j + 1;
+        }
+        return true;
+    }
+
+    /** Consume the keyword if the current token spells it. */
+    boolean atWord(String w) {
+        if (this.wordIs(this.p, w)) {
+            this.p = this.p + 1;
+            return true;
+        }
+        return false;
+    }
+
+    boolean atKind(int32 k) {
+        if (this.cur() == k) {
+            this.p = this.p + 1;
+            return true;
+        }
+        return false;
+    }
+
+    void expect(int32 k, String what) {
+        if (this.atKind(k) == false) {
+            throw heap JinjaException("expected " + what + " at line "
+                + this.curLine() + ", column " + this.curCol(),
+                this.curLine(), this.curCol());
+        }
+    }
+
+    void fail(String msg) {
+        throw heap JinjaException(msg + " at line " + this.curLine()
+            + ", column " + this.curCol(), this.curLine(), this.curCol());
+    }
+
+    // ── template level ─────────────────────────────────────────────────
+
+    int32 parseTemplate() {
+        int32 head = 0 - 1;
+        int32 tail = 0 - 1;
+        while (this.cur() != Tok.K_EOF) {
+            int32 node = 0 - 1;
+            int32 k = this.cur();
+            if (k == Tok.K_TEXT) {
+                node = this.nd.add(Node.N_TEXT, this.curLine());
+                String txt #= this.tk.spanText(this.p);
+                this.nd.setStr(node, #txt);
+                this.p = this.p + 1;
+            } else if (k == Tok.K_VAR_OPEN) {
+                int32 line = this.curLine();
+                this.p = this.p + 1;
+                int32 e = this.parseExpr();
+                this.expect(Tok.K_VAR_CLOSE, "'}}'");
+                node = this.nd.add(Node.N_OUT, line);
+                this.nd.setA(node, e);
+            } else if (k == Tok.K_STMT_OPEN) {
+                int32 line = this.curLine();
+                int32 col = this.curCol();
+                String kw = "?";
+                if (this.kindAt(this.p + 1) == Tok.K_NAME) {
+                    String kwName #= this.tk.spanText(this.p + 1);
+                    kw = "" + kwName;
+                }
+                throw heap JinjaException("unsupported construct '{% "
+                    + kw + " %}' at line " + line
+                    + ": statements land with Unit 4", line, col);
+            } else {
+                this.fail("unexpected token in template");
+            }
+            if (tail < 0) {
+                head = node;
+            } else {
+                this.nd.setNx(tail, node);
+            }
+            tail = node;
+        }
+        return head;
+    }
+
+    // ── expressions, loosest to tightest ───────────────────────────────
+
+    int32 parseExpr() {
+        return this.parseCond();
+    }
+
+    /** `a if cond else b` — the inline conditional; `else` optional
+     *  (omitted -> undefined when the condition is false). */
+    int32 parseCond() {
+        int32 v = this.parseOr();
+        if (this.atWord("if")) {
+            int32 line = this.curLine();
+            int32 cond = this.parseOr();
+            int32 els = 0 - 1;
+            if (this.atWord("else")) {
+                els = this.parseCond();
+            }
+            int32 node = this.nd.add(Node.E_COND, line);
+            this.nd.setA(node, cond);
+            this.nd.setB(node, v);
+            this.nd.setC(node, els);
+            return node;
+        }
+        return v;
+    }
+
+    int32 parseOr() {
+        int32 l = this.parseAnd();
+        while (this.atWord("or")) {
+            l = this.bin("or", l, this.parseAnd());
+        }
+        return l;
+    }
+
+    int32 parseAnd() {
+        int32 l = this.parseNot();
+        while (this.atWord("and")) {
+            l = this.bin("and", l, this.parseNot());
+        }
+        return l;
+    }
+
+    int32 parseNot() {
+        if (this.atWord("not")) {
+            int32 node = this.nd.add(Node.E_NOT, this.curLine());
+            this.nd.setA(node, this.parseNot());
+            return node;
+        }
+        return this.parseCompare();
+    }
+
+    /** Comparisons CHAIN like Python's: `1 < 2 < 3` is one E_CMP with
+     *  an E_CMPOP list, each operand evaluated once. */
+    int32 parseCompare() {
+        int32 first = this.parseAdd();
+        int32 opHead = 0 - 1;
+        int32 opTail = 0 - 1;
+        while (true) {
+            String op = null;
+            int32 k = this.cur();
+            if (k == Tok.K_EQ) { op = "=="; }
+            else if (k == Tok.K_NE) { op = "!="; }
+            else if (k == Tok.K_LT) { op = "<"; }
+            else if (k == Tok.K_LE) { op = "<="; }
+            else if (k == Tok.K_GT) { op = ">"; }
+            else if (k == Tok.K_GE) { op = ">="; }
+            if (op != null) {
+                this.p = this.p + 1;
+            } else if (this.wordIs(this.p, "in")) {
+                this.p = this.p + 1;
+                op = "in";
+            } else if (this.wordIs(this.p, "not")
+                    && this.wordIs(this.p + 1, "in")) {
+                this.p = this.p + 2;
+                op = "notin";
+            } else {
+                break;
+            }
+            int32 line = this.curLine();
+            int32 operand = this.parseAdd();
+            int32 opNode = this.nd.add(Node.E_CMPOP, line);
+            String o = "" + op;
+            this.nd.setStr(opNode, #o);
+            this.nd.setA(opNode, operand);
+            if (opTail < 0) {
+                opHead = opNode;
+            } else {
+                this.nd.setNx(opTail, opNode);
+            }
+            opTail = opNode;
+        }
+        if (opHead < 0) {
+            return first;
+        }
+        int32 node = this.nd.add(Node.E_CMP, this.nd.line(first));
+        this.nd.setA(node, first);
+        this.nd.setB(node, opHead);
+        return node;
+    }
+
+    int32 parseAdd() {
+        int32 l = this.parseConcat();
+        while (true) {
+            if (this.atKind(Tok.K_PLUS)) {
+                l = this.bin("+", l, this.parseConcat());
+            } else if (this.atKind(Tok.K_MINUS)) {
+                l = this.bin("-", l, this.parseConcat());
+            } else {
+                return l;
+            }
+        }
+    }
+
+    int32 parseConcat() {
+        int32 l = this.parseMul();
+        while (this.atKind(Tok.K_TILDE)) {
+            l = this.bin("~", l, this.parseMul());
+        }
+        return l;
+    }
+
+    int32 parseMul() {
+        int32 l = this.parsePow();
+        while (true) {
+            if (this.atKind(Tok.K_STAR)) {
+                l = this.bin("*", l, this.parsePow());
+            } else if (this.atKind(Tok.K_DSLASH)) {
+                l = this.bin("//", l, this.parsePow());
+            } else if (this.atKind(Tok.K_SLASH)) {
+                l = this.bin("/", l, this.parsePow());
+            } else if (this.atKind(Tok.K_PERCENT)) {
+                l = this.bin("%", l, this.parsePow());
+            } else {
+                return l;
+            }
+        }
+    }
+
+    /** `**` is LEFT-associative in Jinja (2**3**2 = 64), and its
+     *  operands are unaries, so -2**2 = (-2)**2 = 4. */
+    int32 parsePow() {
+        int32 l = this.parseUnary(true);
+        while (this.atKind(Tok.K_DSTAR)) {
+            l = this.bin("**", l, this.parseUnary(true));
+        }
+        return l;
+    }
+
+    int32 parseUnary(boolean withFilter) {
+        int32 v = 0 - 1;
+        if (this.atKind(Tok.K_MINUS)) {
+            v = this.nd.add(Node.E_NEG, this.curLine());
+            this.nd.setA(v, this.parseUnary(false));
+        } else if (this.atKind(Tok.K_PLUS)) {
+            v = this.nd.add(Node.E_POS, this.curLine());
+            this.nd.setA(v, this.parseUnary(false));
+        } else {
+            v = this.parsePrimary();
+        }
+        v = this.parsePostfix(v);
+        if (withFilter) {
+            v = this.parseFilterExpr(v);
+        }
+        return v;
+    }
+
+    /** `.name`, `[subscript]`, `(args)`. */
+    int32 parsePostfix(int32 v) {
+        while (true) {
+            int32 k = this.cur();
+            if (k == Tok.K_DOT) {
+                this.p = this.p + 1;
+                if (this.cur() != Tok.K_NAME) {
+                    this.fail("expected an attribute name after '.'");
+                }
+                int32 node = this.nd.add(Node.E_ATTR, this.curLine());
+                this.nd.setA(node, v);
+                String attr #= this.tk.spanText(this.p);
+                this.nd.setStr(node, #attr);
+                this.p = this.p + 1;
+                v = node;
+            } else if (k == Tok.K_LBRACKET) {
+                this.p = this.p + 1;
+                v = this.parseSubscript(v);
+            } else if (k == Tok.K_LPAREN) {
+                this.p = this.p + 1;
+                int32 line = this.curLine();
+                int32 args = this.parseArgs();
+                int32 node = this.nd.add(Node.E_CALL, line);
+                this.nd.setA(node, v);
+                this.nd.setB(node, args);
+                v = node;
+            } else {
+                return v;
+            }
+        }
+    }
+
+    /** Filters and `is` tests — postfix-level in Jinja, which is why
+     *  `1 < 2 is defined` means `1 < (2 is defined)`. */
+    int32 parseFilterExpr(int32 v) {
+        while (true) {
+            int32 k = this.cur();
+            if (k == Tok.K_PIPE) {
+                this.p = this.p + 1;
+                if (this.cur() != Tok.K_NAME) {
+                    this.fail("expected a filter name after '|'");
+                }
+                int32 node = this.nd.add(Node.E_FILTER, this.curLine());
+                this.nd.setA(node, v);
+                String fname #= this.tk.spanText(this.p);
+                this.nd.setStr(node, #fname);
+                this.p = this.p + 1;
+                if (this.atKind(Tok.K_LPAREN)) {
+                    this.nd.setB(node, this.parseArgs());
+                }
+                v = node;
+            } else if (this.wordIs(this.p, "is")) {
+                this.p = this.p + 1;
+                boolean neg = this.atWord("not");
+                if (this.cur() != Tok.K_NAME) {
+                    this.fail("expected a test name after 'is'");
+                }
+                int32 node = this.nd.add(Node.E_TEST, this.curLine());
+                this.nd.setA(node, v);
+                String tname #= this.tk.spanText(this.p);
+                this.nd.setStr(node, #tname);
+                this.p = this.p + 1;
+                if (neg) {
+                    this.nd.setD(node, 1);
+                }
+                if (this.atKind(Tok.K_LPAREN)) {
+                    this.nd.setB(node, this.parseArgs());
+                }
+                v = node;
+            } else if (k == Tok.K_LPAREN) {
+                // calls are valid after filters and tests too
+                this.p = this.p + 1;
+                int32 line = this.curLine();
+                int32 args = this.parseArgs();
+                int32 node = this.nd.add(Node.E_CALL, line);
+                this.nd.setA(node, v);
+                this.nd.setB(node, args);
+                v = node;
+            } else {
+                return v;
+            }
+        }
+    }
+
+    /** After '[': index or slice (`start? ':' stop? (':' step?)?`),
+     *  negative and open-ended forms included (spec 2.16). */
+    int32 parseSubscript(int32 obj) {
+        int32 line = this.curLine();
+        int32 start = 0 - 1;
+        int32 stop = 0 - 1;
+        int32 step = 0 - 1;
+        boolean sawColon = false;
+        if (this.cur() != Tok.K_COLON) {
+            start = this.parseExpr();
+        }
+        if (this.atKind(Tok.K_COLON)) {
+            sawColon = true;
+            if (this.cur() != Tok.K_COLON
+                    && this.cur() != Tok.K_RBRACKET) {
+                stop = this.parseExpr();
+            }
+            if (this.atKind(Tok.K_COLON)) {
+                if (this.cur() != Tok.K_RBRACKET) {
+                    step = this.parseExpr();
+                }
+            }
+        }
+        this.expect(Tok.K_RBRACKET, "']'");
+        if (sawColon) {
+            int32 node = this.nd.add(Node.E_SLICE, line);
+            this.nd.setA(node, obj);
+            this.nd.setB(node, start);
+            this.nd.setC(node, stop);
+            this.nd.setE(node, step);
+            return node;
+        }
+        int32 idx = this.nd.add(Node.E_INDEX, line);
+        this.nd.setA(idx, obj);
+        this.nd.setB(idx, start);
+        return idx;
+    }
+
+    /** After '(': positional args and `name=value` kwargs, ')'. */
+    int32 parseArgs() {
+        int32 head = 0 - 1;
+        int32 tail = 0 - 1;
+        while (this.cur() != Tok.K_RPAREN && this.cur() != Tok.K_EOF) {
+            int32 node = 0 - 1;
+            if (this.cur() == Tok.K_NAME
+                    && this.kindAt(this.p + 1) == Tok.K_ASSIGN) {
+                node = this.nd.add(Node.E_KWARG, this.curLine());
+                String nm #= this.tk.spanText(this.p);
+                this.nd.setStr(node, #nm);
+                this.p = this.p + 2;
+                this.nd.setA(node, this.parseExpr());
+            } else {
+                node = this.parseExpr();
+            }
+            if (tail < 0) {
+                head = node;
+            } else {
+                this.nd.setNx(tail, node);
+            }
+            tail = node;
+            if (this.atKind(Tok.K_COMMA) == false) {
+                break;
+            }
+        }
+        this.expect(Tok.K_RPAREN, "')'");
+        return head;
+    }
+
+    int32 parsePrimary() {
+        int32 k = this.cur();
+        int32 line = this.curLine();
+        if (k == Tok.K_STRING) {
+            int32 node = this.nd.add(Node.E_STR, line);
+            String s #= this.tk.spanText(this.p);
+            this.nd.setStr(node, #s);
+            this.p = this.p + 1;
+            return node;
+        }
+        if (k == Tok.K_NUMBER) {
+            int32 node = this.nd.add(Node.E_NUM, line);
+            String raw #= this.tk.spanText(this.p);
+            boolean isFloat = raw.contains(".");
+            this.nd.setStr(node, #raw);
+            if (isFloat) {
+                this.nd.setD(node, 1);
+            }
+            this.p = this.p + 1;
+            return node;
+        }
+        if (k == Tok.K_LPAREN) {
+            this.p = this.p + 1;
+            int32 v = this.parseExpr();
+            if (this.cur() == Tok.K_COMMA) {
+                this.fail("unsupported construct: tuple expression");
+            }
+            this.expect(Tok.K_RPAREN, "')'");
+            return v;
+        }
+        if (k == Tok.K_LBRACKET) {
+            this.p = this.p + 1;
+            int32 node = this.nd.add(Node.E_LIST, line);
+            int32 head = 0 - 1;
+            int32 tail = 0 - 1;
+            while (this.cur() != Tok.K_RBRACKET
+                    && this.cur() != Tok.K_EOF) {
+                int32 item = this.parseExpr();
+                if (tail < 0) {
+                    head = item;
+                } else {
+                    this.nd.setNx(tail, item);
+                }
+                tail = item;
+                if (this.atKind(Tok.K_COMMA) == false) {
+                    break;
+                }
+            }
+            this.expect(Tok.K_RBRACKET, "']'");
+            this.nd.setA(node, head);
+            return node;
+        }
+        if (k == Tok.K_LBRACE) {
+            this.p = this.p + 1;
+            int32 node = this.nd.add(Node.E_DICT, line);
+            int32 head = 0 - 1;
+            int32 tail = 0 - 1;
+            while (this.cur() != Tok.K_RBRACE
+                    && this.cur() != Tok.K_EOF) {
+                int32 key = this.parseExpr();
+                this.expect(Tok.K_COLON, "':' in a dict literal");
+                int32 val = this.parseExpr();
+                int32 pair = this.nd.add(Node.E_PAIR, this.curLine());
+                this.nd.setA(pair, key);
+                this.nd.setB(pair, val);
+                if (tail < 0) {
+                    head = pair;
+                } else {
+                    this.nd.setNx(tail, pair);
+                }
+                tail = pair;
+                if (this.atKind(Tok.K_COMMA) == false) {
+                    break;
+                }
+            }
+            this.expect(Tok.K_RBRACE, "'}'");
+            this.nd.setA(node, head);
+            return node;
+        }
+        if (k == Tok.K_NAME) {
+            if (this.wordIs(this.p, "true") || this.wordIs(this.p, "True")) {
+                this.p = this.p + 1;
+                return this.nd.add(Node.E_TRUE, line);
+            }
+            if (this.wordIs(this.p, "false")
+                    || this.wordIs(this.p, "False")) {
+                this.p = this.p + 1;
+                return this.nd.add(Node.E_FALSE, line);
+            }
+            if (this.wordIs(this.p, "none") || this.wordIs(this.p, "None")) {
+                this.p = this.p + 1;
+                return this.nd.add(Node.E_NONE, line);
+            }
+            int32 node = this.nd.add(Node.E_NAME, line);
+            String nm #= this.tk.spanText(this.p);
+            this.nd.setStr(node, #nm);
+            this.p = this.p + 1;
+            return node;
+        }
+        this.fail("expression expected");
+        return 0 - 1;                        // unreachable
+    }
+
+    int32 bin(String op, int32 l, int32 r) {
+        int32 node = this.nd.add(Node.E_BIN, this.nd.line(l));
+        this.nd.setA(node, l);
+        this.nd.setB(node, r);
+        String o = "" + op;
+        this.nd.setStr(node, #o);
+        return node;
+    }
+}

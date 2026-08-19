@@ -12,6 +12,7 @@ import cajeta.lang.String;
  *              else 0
  *   b[i]     — payload length, else 0
  *   line[i]  — 1-based template line the token starts on
+ *   col[i]   — 1-based column the token starts at
  *
  * TEXT rows carry template text AFTER whitespace control was applied.
  * STRING rows carry UNESCAPED bytes. NUMBER rows carry the literal's
@@ -61,6 +62,7 @@ public final class Tok {
     public int32[] a;
     public int32[] b;
     public int32[] line;
+    public int32[] col;
     public int32 n;
 
     // Payload bytes for TEXT/NAME/STRING/NUMBER rows.
@@ -84,6 +86,7 @@ public final class Tok {
         this.a = heap int32[64];
         this.b = heap int32[64];
         this.line = heap int32[64];
+        this.col = heap int32[64];
         this.n = 0;
         this.bytes = heap Buf();
     }
@@ -97,26 +100,30 @@ public final class Tok {
         int32[] a2 = heap int32[cap];
         int32[] b2 = heap int32[cap];
         int32[] l2 = heap int32[cap];
+        int32[] c2 = heap int32[cap];
         int32 i = 0;
         while (i < this.n) {
             k2[i] = this.kind[i];
             a2[i] = this.a[i];
             b2[i] = this.b[i];
             l2[i] = this.line[i];
+            c2[i] = this.col[i];
             i = i + 1;
         }
         this.kind #= k2;
         this.a #= a2;
         this.b #= b2;
         this.line #= l2;
+        this.col #= c2;
     }
 
-    int32 add(int32 k, int32 ln) {
+    int32 add(int32 k, int32 ln, int32 cl) {
         this.ensure();
         this.kind[this.n] = k;
         this.a[this.n] = 0;
         this.b[this.n] = 0;
         this.line[this.n] = ln;
+        this.col[this.n] = cl;
         this.n = this.n + 1;
         return this.n - 1;
     }

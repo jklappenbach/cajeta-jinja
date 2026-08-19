@@ -97,24 +97,30 @@ tagClose    : STMT_CLOSE | STMT_CLOSE_TRIM | STMT_CLOSE_KEEP ;// %} -%} +%}
 
 // ── expressions, lowest to highest precedence (spec 2.15/2.16) ──────────
 
+// Jinja2's chain, NOT Python's (verified against the 3.1.6 parser):
+//   `**` is LEFT-associative (2**3**2 = 64), unary minus binds TIGHTER
+//   than `**` (-2**2 = 4), `~` sits BETWEEN +/- and * (1 ~ 2*3 = '16'),
+//   comparisons CHAIN (1 < 2 < 3), and `is` tests bind at postfix level
+//   (1 < 2 is defined  ==  1 < (2 is defined)).
 expr        : condExpr ;
 condExpr    : orExpr ('if' orExpr ('else' condExpr)?)? ;   // inline if
 orExpr      : andExpr ('or' andExpr)* ;
 andExpr     : notExpr ('and' notExpr)* ;
 notExpr     : 'not' notExpr | comparison ;
-comparison  : concat (compOp concat | ('not')? 'in' concat
-              | 'is' ('not')? test)* ;
+comparison  : additive (compOp additive
+              | ('not')? 'in' additive)* ;                 // CHAINED
 compOp      : '==' | '!=' | '<' | '<=' | '>' | '>=' ;
+additive    : concat (('+'|'-') concat)* ;
+concat      : term ('~' term)* ;
+term        : power (('*'|'/'|'//'|'%') power)* ;
+power       : unary ('**' unary)* ;                        // left-assoc
+unary       : ('-'|'+') unary | postfix ;
 test        : NAME ('(' argList? ')')? ;                   // spec 2.18
-concat      : additive ('~' additive)* ;
-additive    : term (('+'|'-') term)* ;
-term        : factor (('*'|'/'|'//'|'%') factor)* ;
-factor      : ('-'|'+') factor | power ;
-power       : postfix ('**' factor)? ;
 postfix     : primary (('.' NAME)
                       | ('[' slice ']')
                       | ('(' argList? ')')
-                      | ('|' filterCall))* ;
+                      | ('|' filterCall)
+                      | ('is' ('not')? test))* ;
 slice       : expr | expr? ':' expr? (':' expr?)? ;        // negative ok
 filterChain : filterCall ('|' filterCall)* ;
 filterCall  : NAME ('(' argList? ')')? ;                   // spec 2.17

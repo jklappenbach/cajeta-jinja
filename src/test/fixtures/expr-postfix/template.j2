@@ -1,0 +1,6 @@
+{{ user.name }}|{{ user['name'] }}|{{ user.tags[1] }}|{{ user.tags[-1] }}
+{{ s[2] }}|{{ s[-2] }}|{{ s[1:4] }}|{{ s[:3] }}|{{ s[3:] }}|{{ s[-3:] }}|{{ s[::2] }}|{{ s[::-1] }}
+{{ nums[1:5:2] }}|{{ nums[::-2] }}|{{ nums[4:] }}|{{ nums[:-4] }}
+{{ user.name.upper() }}|{{ user.name.split(' ')[0] }}|{{ user.name.startswith('Ada') }}|{{ user.name.endswith('lace') }}
+{{ user.name.replace('Ada', 'Miss') }}|{{ '  pad  '.strip() }}|{{ 'UP'.lower() }}
+{{ user.get('name') }}|{{ user.get('missing', 'dflt') }}|{{ 'name' in user }}

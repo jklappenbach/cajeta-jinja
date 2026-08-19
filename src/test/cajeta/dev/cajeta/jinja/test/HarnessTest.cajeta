@@ -73,7 +73,8 @@ public class HarnessTest {
         int8[] want #= File.readAllBytes(base + "/expected.out");
 
         Template t #= env.compile(tpl);
-        JsonValue ctx = heap JsonValue();
+        int8[] ctxBytes #= File.readAllBytes(base + "/context.json");
+        JsonValue ctx #= Json.parse(ctxBytes, (int64) ctxBytes.count());
         String got #= t.render(ctx);
         int8[] gotBytes #= got.toBytes();
 
@@ -162,17 +163,17 @@ public class HarnessTest {
 
     /** Spec 2.22 discipline from day one: a construct the engine cannot
      *  render fails LOUDLY, naming the construct and line — never
-     *  renders something subtly wrong. (Unit 2 replaces the guard with
-     *  the real lexer; this pin survives that unchanged.) */
+     *  renders something subtly wrong. Unit 3 made `{{ }}` real, so the
+     *  guard sits on STATEMENT tags until Unit 4 — and it fires at
+     *  COMPILE time now that parsing lives in Environment.compile
+     *  (spec 5.2/5.3). */
     @Test
     public void unsupportedConstructFailsLoudly() {
         Environment env = heap Environment();
-        Template t #= env.compile("line one\n{{ user }}\n");
-        JsonValue ctx = heap JsonValue();
         boolean threw = false;
         try {
-            String out #= t.render(ctx);
-            Assert.isTrue(out == null);   // unreachable
+            Template t #= env.compile("line one\n{% if user %}x{% endif %}\n");
+            threw = t == null;   // unreachable
         } catch (JinjaException e) {
             threw = true;
             Assert.isTrue(e.line == 2);

@@ -41,6 +41,17 @@ final class Buf {
         this.n = this.n + 1;
     }
 
+    void addStr(String s) {
+        int32 m = s.byteLength();
+        this.ensure(m);
+        int32 i = 0;
+        while (i < m) {
+            this.b[this.n + i] = (int8) s.byteAt(i);
+            i = i + 1;
+        }
+        this.n = this.n + m;
+    }
+
     /** Drop the trailing horizontal whitespace back to a newline
      *  (the `lstrip_blocks` surgery). Start of buffer counts as a
      *  line start. */

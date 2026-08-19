@@ -6,74 +6,46 @@ import cajeta.lang.String;
 /**
  * A compiled template (spec 5.2): renders repeatedly against different
  * contexts without reparsing. Construction snapshots the Environment's
- * settings; the source is an OWNED copy (a template outlives most
- * sources of its text).
+ * settings and runs the WHOLE front half — lex + parse — so a parse
+ * error surfaces at compile() with line and column (spec 5.3), and a
+ * Template that constructed successfully cannot fail to parse later.
  *
- * UNIT 1 SCOPE: literal passthrough only. Any Jinja delimiter (`{{`,
- * `{%`, `{#`) fails loudly with the line it appears on (spec 2.22's
- * discipline from day one) — the lexer/parser arrive with Unit 2 and
- * replace the scan below, not the surface.
+ * The compiled form is the flat `Node` table, which owns every string
+ * payload — the source text, the token stream, and the Lexer all drop
+ * at the end of this constructor (spec 3.2's discipline applied to the
+ * AST itself).
+ *
+ * UNIT 3 STATE: text and `{{ expression }}` output render with the full
+ * expression grammar; statement tags fail loudly at compile time naming
+ * keyword and line (spec 2.22). Unit 4 brings statements.
  */
 public final class Template {
-    String source;
-    boolean trimBlocksFlag;
-    boolean lstripBlocksFlag;
-    boolean autoescapeFlag;
+    Node nd;
     boolean strictUndefinedFlag;
+    boolean autoescapeFlag;
     int64 nowEpochSecondsVal;
 
     public Template(String source, boolean trimBlocks, boolean lstripBlocks,
                     boolean autoescape, boolean strictUndefined,
                     int64 nowEpochSeconds) {
-        // Copy — the compiled template must not dangle when the caller's
-        // source string drops (stdlib-ownership-convention §2.5).
-        this.source = "" + source;
-        this.trimBlocksFlag = trimBlocks;
-        this.lstripBlocksFlag = lstripBlocks;
         this.autoescapeFlag = autoescape;
         this.strictUndefinedFlag = strictUndefined;
         this.nowEpochSecondsVal = nowEpochSeconds;
+        Lexer lx = heap Lexer(source, trimBlocks, lstripBlocks);
+        Tok toks = lx.tokenize();
+        this.nd #= Parser.parse(toks);
     }
 
     /**
      * Render against a context. The result is a fresh owned String
-     * (producer, §2.1); `context` is read, never captured.
-     *
-     * UNIT 2 STATE: text and comments render — the Lexer applies the
-     * whitespace contract (trim_blocks / lstrip_blocks / explicit
-     * dashes), comments vanish, text passes through. Output and
-     * statement tags still fail loudly with construct + line (spec
-     * 2.22); Units 3/4 replace the rejection with evaluation.
+     * (producer, §2.1); `context` is read for the duration of the call
+     * and never captured — every value the evaluator keeps is a copy.
      */
     public #String render(JsonValue context) {
-        Lexer lx = heap Lexer(this.source, this.trimBlocksFlag,
-            this.lstripBlocksFlag);
-        Tok toks = lx.tokenize();
-        Buf out = heap Buf();
-        int32 i = 0;
-        while (i < toks.n) {
-            int32 k = toks.kind[i];
-            if (k == Tok.K_EOF) {
-                break;
-            }
-            if (k == Tok.K_TEXT) {
-                int32 s = toks.a[i];
-                int32 m = toks.b[i];
-                int32 j = 0;
-                while (j < m) {
-                    out.addByte(((int32) toks.bytes.b[s + j]) & 255);
-                    j = j + 1;
-                }
-                i = i + 1;
-                continue;
-            }
-            String kind = "{{ }}";
-            if (k == Tok.K_STMT_OPEN) { kind = "{% %}"; }
-            throw heap JinjaException(
-                "unsupported construct '" + kind + "' at line "
-                + toks.line[i] + ": rendering lands with Units 3-4",
-                toks.line[i], 0);
-        }
-        return out.take();
+        Eval ev = heap Eval();
+        ev.nd = this.nd;
+        ev.ctx = context;
+        ev.strict = this.strictUndefinedFlag;
+        return #ev.render();
     }
 }

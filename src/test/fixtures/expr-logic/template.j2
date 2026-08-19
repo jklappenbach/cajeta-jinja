@@ -1,0 +1,5 @@
+{{ 1 < 2 and 2 < 3 }}|{{ not (1 > 2) }}|{{ 1 == 1.0 }}|{{ 'a' < 'b' }}|{{ true == 1 }}
+{{ 1 < 2 < 3 }}|{{ 3 > 2 > 1 }}|{{ 1 <= 1 >= 1 }}|{{ 1 != 2 }}
+{{ 'x' in 'axe' }}|{{ 3 not in [1, 2] }}|{{ 'a' in {'a': 1} }}|{{ 2 in [1, 2] }}
+{{ 'yes' if 1 > 0 else 'no' }}|[{{ 'skip' if false }}]|{{ 0 or 'fallback' }}|{{ 'first' and 'second' }}
+{{ none == none }}|{{ false or false or 'third' }}|{{ not not true }}
