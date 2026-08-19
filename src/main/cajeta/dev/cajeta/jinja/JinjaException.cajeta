@@ -1,0 +1,25 @@
+package dev.cajeta.jinja;
+
+import cajeta.error.RecoverableException;
+import cajeta.lang.String;
+
+/**
+ * Any cajeta-jinja failure: parse errors (with line and column), render
+ * errors (with the template line), and unsupported constructs (spec
+ * 2.22: the error names the construct and the line rather than
+ * rendering something subtly wrong).
+ *
+ * `line`/`column` are 1-based; 0 means "not applicable" (e.g. a render
+ * error with no position).
+ */
+public class JinjaException extends RecoverableException {
+    public int32 line;
+    public int32 column;
+
+    public JinjaException(#String message, int32 line, int32 column) {
+        this.message = message;
+        this.cause = 0;
+        this.line = line;
+        this.column = column;
+    }
+}

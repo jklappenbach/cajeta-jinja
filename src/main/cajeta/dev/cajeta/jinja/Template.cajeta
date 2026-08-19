@@ -1,0 +1,73 @@
+package dev.cajeta.jinja;
+
+import cajeta.codec.json.JsonValue;
+import cajeta.lang.String;
+
+/**
+ * A compiled template (spec 5.2): renders repeatedly against different
+ * contexts without reparsing. Construction snapshots the Environment's
+ * settings; the source is an OWNED copy (a template outlives most
+ * sources of its text).
+ *
+ * UNIT 1 SCOPE: literal passthrough only. Any Jinja delimiter (`{{`,
+ * `{%`, `{#`) fails loudly with the line it appears on (spec 2.22's
+ * discipline from day one) — the lexer/parser arrive with Unit 2 and
+ * replace the scan below, not the surface.
+ */
+public final class Template {
+    String source;
+    boolean trimBlocksFlag;
+    boolean lstripBlocksFlag;
+    boolean autoescapeFlag;
+    boolean strictUndefinedFlag;
+    int64 nowEpochSecondsVal;
+
+    public Template(String source, boolean trimBlocks, boolean lstripBlocks,
+                    boolean autoescape, boolean strictUndefined,
+                    int64 nowEpochSeconds) {
+        // Copy — the compiled template must not dangle when the caller's
+        // source string drops (stdlib-ownership-convention §2.5).
+        this.source = "" + source;
+        this.trimBlocksFlag = trimBlocks;
+        this.lstripBlocksFlag = lstripBlocks;
+        this.autoescapeFlag = autoescape;
+        this.strictUndefinedFlag = strictUndefined;
+        this.nowEpochSecondsVal = nowEpochSeconds;
+    }
+
+    /**
+     * Render against a context. The result is a fresh owned String
+     * (producer, §2.1); `context` is read, never captured.
+     */
+    public #String render(JsonValue context) {
+        // Unit 1: literal passthrough with loud rejection of anything
+        // that needs the (not yet built) language. Scans bytes: a '{'
+        // followed by '{', '%', or '#' is a construct we cannot render.
+        int8[] src #= this.source.toBytes();
+        int32 n = this.source.byteLength();
+        int32 line = 1;
+        int32 i = 0;
+        while (i < n) {
+            int32 b = ((int32) src[i]) & 255;
+            if (b == 10) {
+                line = line + 1;
+            }
+            if (b == 123 && i + 1 < n) {          // '{'
+                int32 next = ((int32) src[i + 1]) & 255;
+                if (next == 123 || next == 37 || next == 35) {  // '{' '%' '#'
+                    String kind = "{{";
+                    if (next == 37) { kind = "{%"; }
+                    if (next == 35) { kind = "{#"; }
+                    throw heap JinjaException(
+                        "unsupported construct '" + kind + "' at line "
+                        + line + ": the Unit 2 lexer has not landed",
+                        line, 0);
+                }
+            }
+            i = i + 1;
+        }
+        // A fresh concat is an owned temporary; it promotes into the
+        // `#String` return implicitly.
+        return "" + this.source;
+    }
+}

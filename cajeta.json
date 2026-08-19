@@ -1,0 +1,72 @@
+{
+    // cajeta-jinja — a Jinja2-compatible template engine for the cajeta
+    // ecosystem: lexer, parser, interpreter, and the filter/test library
+    // over a JsonValue-shaped context (cajeta-jinja-spec §1.1). Extracted
+    // from cajeta-llama Unit 13, which was building a private subset
+    // inside an inference engine — the wrong home for it (§1.2).
+    //
+    // A LIBRARY project: no `entry-method`, the build emits a reusable
+    // `.cja`. Consumers: cajeta-llama (chat templates, autoescape off)
+    // and later cajeta-http (HTML, autoescape on).
+    //
+    // VERSIONING — `details.version` is the SINGLE source of truth, per
+    // the cajeta-ml precedent.
+
+    "details": {
+        "name":               "dev.cajeta.jinja",
+        "version":            "0.1.0",
+        "description":        "cajeta-jinja — Jinja2-compatible template engine: lexer, parser, interpreter, filters/tests, JsonValue context",
+        "license":            "Apache-2.0",
+        "authors":            ["Julian Klappenbach"],
+        "cajeta-lang-version": "1.0"
+    },
+
+    "settings": {
+        // The test harness reads the generated fixture corpus from disk
+        // (src/test/fixtures); the library itself only needs the
+        // filesystem for the Unit 8 template loader.
+        "capabilities": ["filesystem"],
+
+        // JsonValue (the context/value model), String/StringBuilder, and
+        // collections are core stdlib — built into the toolchain, not
+        // declared.
+        "dependencies": {},
+
+        // The suite is driven by cajeta-unit's reflective @Test
+        // discovery; run-tests.sh resolves the archive (sibling
+        // checkout, then store, then a sha256-verified Olla fetch at
+        // this pin).
+        "dev-dependencies": {
+            "dev.cajeta.unit": "0.2.2"
+        },
+
+        "repositories": [
+            { "name": "central", "url": "https://olla.cajeta.dev",
+              "priority": 0 }
+        ],
+
+        // NO `entry-method` — this is a library; the build emits a .cja.
+        "build": {
+            "source-root": "src/main/cajeta",
+            "target": "host"
+        }
+    },
+
+    "tasks": {
+
+        "build": {
+            "description": "Compile sources to a .cja library archive",
+            "actions": [
+                { "action": "build", "flavor": "debug", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "test": {
+            "description": "Build + run the library's test suite",
+            "actions": [
+                { "action": "exec", "command": "./run-tests.sh" }
+            ]
+        }
+    }
+}

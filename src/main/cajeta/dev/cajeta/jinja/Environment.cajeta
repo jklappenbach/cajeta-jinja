@@ -1,0 +1,83 @@
+package dev.cajeta.jinja;
+
+import cajeta.lang.String;
+
+/**
+ * The engine's settings carrier and template compiler (spec 5.1). An
+ * Environment holds the knobs that change RENDERED BYTES — whitespace
+ * trimming, autoescaping, undefined behaviour, the injected clock — and
+ * compiles templates that render repeatedly against different contexts
+ * (spec 5.2).
+ *
+ * Defaults match Jinja2's: `trim_blocks=False`, `lstrip_blocks=False`,
+ * autoescape off, permissive undefined. `transformers` renders chat
+ * templates with BOTH trim flags on (spec 1.5) — the consumer chooses;
+ * a default-mismatched engine produces byte-wrong output with no error.
+ *
+ * The clock is injectable (spec 2.21): `strftime_now` reads
+ * `nowEpochSeconds`, so rendering is deterministic under test. 0 means
+ * "unset" and `strftime_now` fails loudly rather than reading a wall
+ * clock it was never given.
+ *
+ * Setters chain: `heap Environment().trimBlocks(true).lstripBlocks(true)`.
+ */
+public final class Environment {
+    boolean trimBlocksFlag;
+    boolean lstripBlocksFlag;
+    boolean autoescapeFlag;
+    boolean strictUndefinedFlag;
+    int64 nowEpochSecondsVal;
+
+    public Environment() {
+        this.trimBlocksFlag = false;
+        this.lstripBlocksFlag = false;
+        this.autoescapeFlag = false;
+        this.strictUndefinedFlag = false;
+        this.nowEpochSecondsVal = 0;
+    }
+
+    public Environment trimBlocks(boolean v) {
+        this.trimBlocksFlag = v;
+        return this;
+    }
+
+    public Environment lstripBlocks(boolean v) {
+        this.lstripBlocksFlag = v;
+        return this;
+    }
+
+    public Environment autoescape(boolean v) {
+        this.autoescapeFlag = v;
+        return this;
+    }
+
+    public Environment strictUndefined(boolean v) {
+        this.strictUndefinedFlag = v;
+        return this;
+    }
+
+    public Environment nowEpochSeconds(int64 v) {
+        this.nowEpochSecondsVal = v;
+        return this;
+    }
+
+    public boolean isTrimBlocks() { return this.trimBlocksFlag; }
+    public boolean isLstripBlocks() { return this.lstripBlocksFlag; }
+    public boolean isAutoescape() { return this.autoescapeFlag; }
+    public boolean isStrictUndefined() { return this.strictUndefinedFlag; }
+    public int64 getNowEpochSeconds() { return this.nowEpochSecondsVal; }
+
+    /**
+     * Compile a template against this environment's settings. The
+     * Template COPIES the source (a template outlives most sources of
+     * its text — stdlib-ownership-convention §2.5) and snapshots the
+     * settings, so later Environment mutation does not change an
+     * already-compiled template's output.
+     */
+    public #Template compile(String source) {
+        Template t #= heap Template(source, this.trimBlocksFlag,
+            this.lstripBlocksFlag, this.autoescapeFlag,
+            this.strictUndefinedFlag, this.nowEpochSecondsVal);
+        return #= t;
+    }
+}
