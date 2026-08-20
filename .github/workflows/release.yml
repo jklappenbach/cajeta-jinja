@@ -1,0 +1,34 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Builds the library .cja on a main push; on a v* tag also publishes a GitHub
+# Release and a signed publish to Olla. Logic lives in the reusable workflow.
+jobs:
+  release:
+    uses: jklappenbach/cajeta/.github/workflows/lib-release.yml@main
+    with:
+      # TOOLCHAIN FLOOR — do not lower. v0.21.1 is the first release that
+      # must carry two fixes this library cannot build or run without:
+      #   - e9aed206: break/continue past a block-scoped owner pops its
+      #     drop-chain entry (a v0.21.0-built archive embeds bitcode whose
+      #     next throw walks a corrupted chain and SIGSEGVs — this repo's
+      #     own error-path tests found it);
+      #   - dccac568: Json.parse's tree API decodes string escapes (the
+      #     tojson fixtures fail byte-compare without it).
+      # If the next toolchain release ships under a different number, bump
+      # this pin to it — the intent is "first release containing both".
+      cajeta-version: v0.21.1
+      # The full oracle suite: fixture corpus byte-compared against
+      # Jinja2-generated references (committed), plus the direct
+      # error-path and ownership tests.
+      test-command: ./run-tests.sh
+      test-timeout-minutes: '20'
+    secrets: inherit
