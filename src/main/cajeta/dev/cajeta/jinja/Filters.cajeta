@@ -1035,9 +1035,10 @@ final class Filters {
         }
         if (name.equals("tojson")) {
             Filters.checkKwargs(ev, args, "indent", "tojson", line);
-            boolean indent = Filters.argAt(ev, args, 0, "indent") >= 0;
+            int32 iw = (int32) Filters.argInt(ev,
+                Filters.argAt(ev, args, 0, "indent"), line, 0);
             Buf b = heap Buf();
-            Filters.writeJson(ev, b, v, indent, 0, line);
+            Filters.writeJson(ev, b, v, iw, 0, line);
             // \u-escaping of <>&' makes the output HTML-safe: Markup.
             return #ev.wrapSafeText(b.take());
         }
@@ -1303,7 +1304,9 @@ final class Filters {
 
     /** HTML-safe json.dumps: standard escapes plus < > & ' as \\uXXXX,
      *  non-ASCII \\u-escaped (ensure_ascii), Python separators. */
-    static void writeJson(Eval ev, Buf b, JsonValue v, boolean indent,
+    /** `indent` is the WIDTH (0 = compact) — transformers templates
+     *  spell tojson(indent=4) and the reference is json.dumps. */
+    static void writeJson(Eval ev, Buf b, JsonValue v, int32 indent,
             int32 level, int32 line) {
         if (v == null) {
             b.addStr("null");
@@ -1339,21 +1342,21 @@ final class Filters {
             while (i < a.count()) {
                 if (i > 0) {
                     b.addByte(44);
-                    if (indent == false) {
+                    if (indent == 0) {
                         b.addByte(32);
                     }
                 }
                 if (indent) {
                     b.addByte(10);
-                    Filters.pad(b, level + 1);
+                    Filters.pad(b, (level + 1) * indent);
                 }
                 Filters.writeJson(ev, b, a.get(i), indent, level + 1,
                     line);
                 i = i + 1;
             }
-            if (indent && a.count() > 0) {
+            if (indent > 0 && a.count() > 0) {
                 b.addByte(10);
-                Filters.pad(b, level);
+                Filters.pad(b, level * indent);
             }
             b.addByte(93);
             return;
@@ -1364,13 +1367,13 @@ final class Filters {
         while (j < o.count()) {
             if (j > 0) {
                 b.addByte(44);
-                if (indent == false) {
+                if (indent == 0) {
                     b.addByte(32);
                 }
             }
-            if (indent) {
+            if (indent > 0) {
                 b.addByte(10);
-                Filters.pad(b, level + 1);
+                Filters.pad(b, (level + 1) * indent);
             }
             String key #= Eval.keyOf(o, j);
             JsonValue kv #= Eval.str(key);
@@ -1383,14 +1386,14 @@ final class Filters {
         }
         if (indent && o.count() > 0) {
             b.addByte(10);
-            Filters.pad(b, level);
+            Filters.pad(b, level * indent);
         }
         b.addByte(125);
     }
 
-    static void pad(Buf b, int32 level) {
+    static void pad(Buf b, int32 spaces) {
         int32 i = 0;
-        while (i < level * 2) {
+        while (i < spaces) {
             b.addByte(32);
             i = i + 1;
         }

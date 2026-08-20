@@ -5,4 +5,10 @@
     "a": 2
   }
 ]
+{
+    "t": [
+        1,
+        2
+    ]
+}
 "plain \"quote\" \\ back"|"tab\tnl\nend"
