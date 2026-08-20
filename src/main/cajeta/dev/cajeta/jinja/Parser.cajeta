@@ -145,6 +145,8 @@ final class Parser {
     boolean isEnderWord(int32 i) {
         return this.wordIs(i, "endif") || this.wordIs(i, "endfor")
             || this.wordIs(i, "endwith") || this.wordIs(i, "endset")
+            || this.wordIs(i, "endmacro") || this.wordIs(i, "endcall")
+            || this.wordIs(i, "endfilter")
             || this.wordIs(i, "else") || this.wordIs(i, "elif");
     }
 
@@ -261,12 +263,106 @@ final class Parser {
             }
             return this.nd.add(Node.N_CONTINUE, line);
         }
+        if (this.atWord("macro")) {
+            return this.parseMacro(line);
+        }
+        if (this.atWord("call")) {
+            return this.parseCallBlock(line);
+        }
+        if (this.atWord("filter")) {
+            return this.parseFilterBlock(line);
+        }
         String kw #= this.tk.spanText(this.p);
         throw heap JinjaException("unsupported construct '{% " + kw
             + " %}' at line " + line
             + " (supported statements: if/elif/else, for, set, with, "
-            + "break, continue; macros/filter blocks/raw land with "
-            + "later units)", line, col);
+            + "break, continue, macro, call, filter, raw)", line, col);
+    }
+
+    /** `(name [= default] (, name [= default])*)` — a macro or call-
+     *  block parameter list as an E_KWARG chain (a = default | -1). */
+    int32 parseParams(String where) {
+        this.expect(Tok.K_LPAREN, "'(' in " + where);
+        int32 head = 0 - 1;
+        int32 tail = 0 - 1;
+        while (this.cur() != Tok.K_RPAREN && this.cur() != Tok.K_EOF) {
+            if (this.cur() != Tok.K_NAME) {
+                this.fail("expected a parameter name in " + where);
+            }
+            int32 node = this.nd.add(Node.E_KWARG, this.curLine());
+            String pn #= this.tk.spanText(this.p);
+            this.nd.setStr(node, #pn);
+            this.p = this.p + 1;
+            if (this.atKind(Tok.K_ASSIGN)) {
+                this.nd.setA(node, this.parseExpr());
+            }
+            if (tail < 0) {
+                head = node;
+            } else {
+                this.nd.setNx(tail, node);
+            }
+            tail = node;
+            if (this.atKind(Tok.K_COMMA) == false) {
+                break;
+            }
+        }
+        this.expect(Tok.K_RPAREN, "')' in " + where);
+        return head;
+    }
+
+    /** `{% macro name(params) %}body{% endmacro %}` */
+    int32 parseMacro(int32 line) {
+        if (this.cur() != Tok.K_NAME) {
+            this.fail("expected a macro name");
+        }
+        int32 node = this.nd.add(Node.N_MACRO, line);
+        String name #= this.tk.spanText(this.p);
+        this.nd.setStr(node, #name);
+        this.p = this.p + 1;
+        this.nd.setA(node, this.parseParams("'{% macro %}'"));
+        this.expect(Tok.K_STMT_CLOSE, "'%}'");
+        int32 body = this.parseBlock();
+        this.nd.setB(node, body);
+        this.expectEnd("endmacro", "macro", line);
+        return node;
+    }
+
+    /** `{% call [(params)] expr %}body{% endcall %}` — the expr must
+     *  be a call. */
+    int32 parseCallBlock(int32 line) {
+        int32 node = this.nd.add(Node.N_CALLBLK, line);
+        if (this.cur() == Tok.K_LPAREN) {
+            this.nd.setC(node, this.parseParams("'{% call %}'"));
+        }
+        int32 callee = this.parseExpr();
+        if (this.nd.k(callee) != Node.E_CALL) {
+            this.fail("'{% call %}' needs a macro call");
+        }
+        this.nd.setA(node, callee);
+        this.expect(Tok.K_STMT_CLOSE, "'%}'");
+        int32 body = this.parseBlock();
+        this.nd.setB(node, body);
+        this.expectEnd("endcall", "call", line);
+        return node;
+    }
+
+    /** `{% filter name[(args)] %}body{% endfilter %}` */
+    int32 parseFilterBlock(int32 line) {
+        if (this.cur() != Tok.K_NAME) {
+            this.fail("expected a filter name after '{% filter'");
+        }
+        int32 node = this.nd.add(Node.N_FILTBLK, line);
+        String fname #= this.tk.spanText(this.p);
+        this.nd.setStr(node, #fname);
+        this.p = this.p + 1;
+        if (this.atKind(Tok.K_LPAREN)) {
+            this.nd.setA(node, this.parseArgs());
+        }
+        this.expect(Tok.K_STMT_CLOSE, "'%}'");
+        int32 body = this.parseBlock();
+        this.nd.setB(node, body);
+        this.expectEnd("endfilter", "filter", line);
+        return node;
     }
 
     /** `{% if cond %}` already consumed through its `%}`. */

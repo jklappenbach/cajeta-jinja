@@ -1,0 +1,6 @@
+{% macro wrap() %}<{{ caller() }}>{% endmacro %}
+{% call wrap() %}body{% endcall %}
+{% macro each(items) %}{% for i in items %}{{ caller(i) }}{% endfor %}{% endmacro %}
+{% call(x) each([1, 2]) %}[{{ x }}]{% endcall %}
+{% set outer = 'O' %}{% macro shell() %}({{ caller() }}){% endmacro %}
+{% call shell() %}{{ outer }}{% endcall %}

@@ -1,0 +1,9 @@
+{% macro greet(name, punct='!') %}Hi {{ name }}{{ punct }}{% endmacro %}
+{{ greet('a') }}|{{ greet('b', '?') }}|{{ greet(punct='.', name='c') }}
+{% macro fac(n) %}{% if n <= 1 %}1{% else %}{{ n * (fac(n - 1) | int) }}{% endif %}{% endmacro %}
+{{ fac(5) }}
+{% set g = 'G' %}{% macro sees() %}{{ g }}[{{ hidden }}]{% endmacro %}
+{% for i in [1] %}{% set hidden = 'H' %}{{ sees() }}{% endfor %}
+{% macro leak() %}{% set q = 5 %}{% endmacro %}{{ leak() }}[{{ q }}]
+{% set d = 9 %}{% macro dflt(x=d) %}{{ x }}{% endmacro %}{{ dflt() }}|{{ dflt(2) }}
+{% macro two() %}2{% endmacro %}{{ (two() | int) + 1 }}|{{ two.name }}|{{ two is defined }}|{{ nomacro is defined }}

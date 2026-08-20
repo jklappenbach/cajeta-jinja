@@ -123,15 +123,18 @@ public class StmtTest {
             "{% with a = 1 %}x{% endif %}"));
     }
 
-    /** Constructs outside Unit 4's set still fail loudly BY NAME. */
+    /** Constructs outside the supported set still fail loudly BY
+     *  NAME (macro/call/filter/raw joined the set with Unit 6). */
     @Test
     public void unsupportedStatementsFailLoudly() {
         Assert.isTrue(StmtTest.compileFails(
-            "{% macro m() %}x{% endmacro %}"));
+            "{% extends 'base.j2' %}"));
+        Assert.isTrue(StmtTest.compileFails(
+            "{% include 'part.j2' %}"));
         Assert.isTrue(StmtTest.compileFails(
             "{% for i in [1] recursive %}x{% endfor %}"));
         Assert.isTrue(StmtTest.compileFails("{% set a, b = 1 %}"));
-        Assert.isTrue(StmtTest.compileFails("{% raw %}x{% endraw %}"));
+        Assert.isTrue(StmtTest.compileFails("{% do x %}"));
     }
 
     /** Unpack arity mismatches are render errors, as in Jinja. */

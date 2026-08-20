@@ -61,6 +61,26 @@ final class Eval {
     boolean brk;
     boolean cont;
 
+    // Macro table — populated in DEFINITION ORDER as N_MACRO executes
+    // (calling before the definition is an undefined error, as Jinja).
+    String[] macroNames;
+    int32[] macroNodes;
+    int32 macroN;
+
+    // Macro visibility: a macro body sees frames [macroBase, depth)
+    // (its own params/locals) plus the template's TOP-LEVEL frame
+    // [0, rootEnd) — never the call site's locals (oracle-verified).
+    // 0/-1 = not inside a macro (normal full visibility).
+    int32 macroBase;
+    int32 rootEnd;
+
+    // The active {% call %} block for caller(): body chain, params
+    // chain, and the CALL-SITE visibility to restore while rendering.
+    int32 callerBody;
+    int32 callerParams;
+    int32 callerBase;
+    int32 callerRootEnd;
+
     // namespace() registry: handles are {"__jinja_ns__": id} objects
     // that COPY freely while the entry here stays shared — reference
     // semantics under the copy discipline
@@ -84,6 +104,45 @@ final class Eval {
         this.cont = false;
         this.nsStore = heap JsonValue[4];
         this.nsN = 0;
+        this.macroNames = heap String[8];
+        this.macroNodes = heap int32[8];
+        this.macroN = 0;
+        this.macroBase = 0;
+        this.rootEnd = 0;
+        this.callerBody = 0 - 1;
+        this.callerParams = 0 - 1;
+        this.callerBase = 0;
+        this.callerRootEnd = 0;
+    }
+
+    int32 macroOf(String name) {
+        int32 i = 0;
+        while (i < this.macroN) {
+            if (this.macroNames[i].equals(name)) {
+                return this.macroNodes[i];
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    void addMacro(String name, int32 node) {
+        if (this.macroN >= (int32) this.macroNodes.count()) {
+            String[] nn = heap String[this.macroN * 2];
+            int32[] ni = heap int32[this.macroN * 2];
+            int32 i = 0;
+            while (i < this.macroN) {
+                nn[i] = this.macroNames[i];
+                ni[i] = this.macroNodes[i];
+                i = i + 1;
+            }
+            this.macroNames #= nn;
+            this.macroNodes #= ni;
+        }
+        String own = "" + name;
+        this.macroNames[this.macroN] #= own;
+        this.macroNodes[this.macroN] = node;
+        this.macroN = this.macroN + 1;
     }
 
     int32 beginScope() {
@@ -151,18 +210,32 @@ final class Eval {
     /** Frames first, then the root context; copies (spec 3.2), null on
      *  a miss (undefined) with the name remembered for diagnostics. */
     #JsonValue lookup(String name) {
+        int32 stop = this.macroBase;
         int32 i = this.depth - 1;
-        while (i >= 0) {
+        while (i >= stop) {
             if (this.names[i].equals(name)) {
                 return #Eval.copy(this.vals[i]);
             }
             i = i - 1;
+        }
+        if (this.macroBase > 0) {
+            // Inside a macro: the template's top-level frame only.
+            i = this.rootEnd - 1;
+            while (i >= 0) {
+                if (this.names[i].equals(name)) {
+                    return #Eval.copy(this.vals[i]);
+                }
+                i = i - 1;
+            }
         }
         if (this.ctx != null && this.ctx.kind() == JsonValue.OBJECT) {
             JsonValue got = this.ctx.object().get(name);
             if (got != null) {
                 return #Eval.copy(got);
             }
+        }
+        if (this.macroOf(name) >= 0) {
+            return #this.makeHandle("__jinja_macro__", name);
         }
         if (Eval.isBuiltinCallable(name)) {
             return #this.makeHandle("__jinja_callable__", name);
@@ -293,6 +366,38 @@ final class Eval {
         }
         if (k == Node.N_FOR) {
             this.execFor(i);
+            return;
+        }
+        if (k == Node.N_MACRO) {
+            this.addMacro(this.nd.strOf(i), i);
+            return;
+        }
+        if (k == Node.N_CALLBLK) {
+            // The E_CALL renders the macro with caller() available.
+            int32 call = this.nd.a(i);
+            JsonValue v #= this.evalCallWithCaller(call,
+                this.nd.b(i), this.nd.c(i));
+            String s #= this.text(v, line);
+            this.out.addStr(s);
+            return;
+        }
+        if (k == Node.N_FILTBLK) {
+            int32 mark = this.out.n;
+            this.runChain(this.nd.b(i));
+            int32 m = this.out.n - mark;
+            int8[] captured = heap int8[m];
+            int32 z = 0;
+            while (z < m) {
+                captured[z] = this.out.b[mark + z];
+                z = z + 1;
+            }
+            this.out.n = mark;
+            JsonValue sv = heap JsonValue();
+            sv.setStringOwned(#captured, m);
+            JsonValue fv #= Filters.apply(this, this.nd.strOf(i), sv,
+                this.nd.a(i), line);
+            String t #= this.text(fv, line);
+            this.out.addStr(t);
             return;
         }
         if (k == Node.N_BREAK) {
@@ -1499,6 +1604,13 @@ final class Eval {
     }
 
     #JsonValue member(JsonValue o, String name) {
+        if (o != null && o.kind() == JsonValue.OBJECT
+                && name.equals("name")) {
+            JsonValue mn = o.object().get("__jinja_macro__");
+            if (mn != null) {
+                return #Eval.copy(mn);
+            }
+        }
         int32 cyId = this.handleId(o, "__jinja_cycler__");
         if (cyId >= 0 && name.equals("current")) {
             JsonObject e = this.nsStore[cyId].object();
@@ -1880,6 +1992,13 @@ final class Eval {
         int32 ck = this.nd.k(callee);
         if (ck == Node.E_NAME) {
             String fn = this.nd.strOf(callee);
+            int32 mac = this.macroOf(fn);
+            if (mac >= 0) {
+                return #this.callMacro(mac, args, 0 - 1, 0 - 1, line);
+            }
+            if (fn.equals("caller")) {
+                return #this.invokeCaller(args, line);
+            }
             if (fn.equals("range")) {
                 return #this.evalRange(args, line);
             }
@@ -2009,6 +2128,17 @@ final class Eval {
             // General callee: a VALUE that is itself callable — a
             // joiner, or a builtin bound to a variable.
             JsonValue cv #= this.eval(callee);
+            if (cv != null && cv.kind() == JsonValue.OBJECT) {
+                JsonValue mh = cv.object().get("__jinja_macro__");
+                if (mh != null) {
+                    String mname #= mh.asString();
+                    int32 mac2 = this.macroOf(mname);
+                    if (mac2 >= 0) {
+                        return #this.callMacro(mac2, args, 0 - 1,
+                            0 - 1, line);
+                    }
+                }
+            }
             int32 jid = this.handleId(cv, "__jinja_joiner__");
             if (jid >= 0) {
                 JsonObject e = this.nsStore[jid].object();
@@ -2031,6 +2161,218 @@ final class Eval {
         }
         this.err("unsupported call form", line);
         return null;                         // unreachable
+    }
+
+    /** N_CALLBLK: run the E_CALL with caller() wired to the block. */
+    #JsonValue evalCallWithCaller(int32 call, int32 body,
+            int32 params) {
+        int32 line = this.nd.line(call);
+        int32 callee = this.nd.a(call);
+        if (this.nd.k(callee) != Node.E_NAME) {
+            this.err("'{% call %}' needs a direct macro call", line);
+        }
+        String fn = this.nd.strOf(callee);
+        int32 mac = this.macroOf(fn);
+        if (mac < 0) {
+            this.err("'" + fn + "' is not a defined macro", line);
+        }
+        return #this.callMacro(mac, this.nd.b(call), body, params,
+            line);
+    }
+
+    /**
+     * Invoke a macro: args evaluate in the CALLER's scope; the body
+     * runs with macro visibility (top-level frame + params only) and
+     * its output is captured as the macro's VALUE. cbBody/cbParams
+     * carry the {% call %} block when there is one.
+     */
+    #JsonValue callMacro(int32 mac, int32 args, int32 cbBody,
+            int32 cbParams, int32 line) {
+        // Evaluate arguments before any visibility change.
+        int32 posN = 0;
+        int32 kwN = 0;
+        int32 a = args;
+        while (a >= 0) {
+            if (this.nd.k(a) == Node.E_KWARG) {
+                kwN = kwN + 1;
+            } else {
+                posN = posN + 1;
+            }
+            a = this.nd.nx(a);
+        }
+        JsonValue[] posVals = heap JsonValue[posN + 1];
+        String[] kwNames = heap String[kwN + 1];
+        JsonValue[] kwVals = heap JsonValue[kwN + 1];
+        int32 pi = 0;
+        int32 ki = 0;
+        a = args;
+        while (a >= 0) {
+            if (this.nd.k(a) == Node.E_KWARG) {
+                String kn = "" + this.nd.strOf(a);
+                this.kwNamesStore(kwNames, ki, kn);
+                kwVals[ki] #= this.eval(this.nd.a(a));
+                ki = ki + 1;
+            } else {
+                posVals[pi] #= this.eval(a);
+                pi = pi + 1;
+            }
+            a = this.nd.nx(a);
+        }
+        // Count declared parameters; extra positionals are loud.
+        int32 params = this.nd.a(mac);
+        int32 declared = 0;
+        int32 w = params;
+        while (w >= 0) {
+            declared = declared + 1;
+            w = this.nd.nx(w);
+        }
+        if (posN > declared) {
+            this.err("macro '" + this.nd.strOf(mac) + "' takes "
+                + declared + " argument(s), got " + posN, line);
+        }
+        // Save the caller view; install macro visibility.
+        int32 savedBase = this.macroBase;
+        int32 savedRoot = this.rootEnd;
+        int32 savedCBody = this.callerBody;
+        int32 savedCParams = this.callerParams;
+        int32 savedCBase = this.callerBase;
+        int32 savedCRoot = this.callerRootEnd;
+        int32 newRoot = savedRoot;
+        if (savedBase == 0) {
+            if (this.fdepth > 1) {
+                newRoot = this.fbase[1];
+            } else {
+                newRoot = this.depth;
+            }
+        }
+        this.callerBody = cbBody;
+        this.callerParams = cbParams;
+        this.callerBase = savedBase;
+        this.callerRootEnd = savedRoot;
+        int32 mark = this.beginScope();
+        this.macroBase = mark;
+        this.rootEnd = newRoot;
+        // Bind parameters: positional, then keyword, then default.
+        int32 p = params;
+        int32 idx = 0;
+        while (p >= 0) {
+            String pname = this.nd.strOf(p);
+            JsonValue bound = null;
+            boolean have = false;
+            if (idx < posN) {
+                bound #= posVals[idx];
+                have = true;
+            } else {
+                int32 k2 = 0;
+                while (k2 < kwN) {
+                    if (kwNames[k2].equals(pname)) {
+                        bound #= kwVals[k2];
+                        have = true;
+                        k2 = kwN;
+                    } else {
+                        k2 = k2 + 1;
+                    }
+                }
+            }
+            if (have == false && this.nd.a(p) >= 0) {
+                // Defaults evaluate at CALL time in the macro's own
+                // visible scope (oracle-verified).
+                bound #= this.eval(this.nd.a(p));
+            }
+            this.push(pname, #bound);
+            idx = idx + 1;
+            p = this.nd.nx(p);
+        }
+        // Run the body, capturing its output as the macro's value.
+        int32 outMark = this.out.n;
+        this.runChain(this.nd.b(mac));
+        int32 m = this.out.n - outMark;
+        int8[] produced = heap int8[m];
+        int32 z = 0;
+        while (z < m) {
+            produced[z] = this.out.b[outMark + z];
+            z = z + 1;
+        }
+        this.out.n = outMark;
+        this.endScope(mark);
+        this.macroBase = savedBase;
+        this.rootEnd = savedRoot;
+        this.callerBody = savedCBody;
+        this.callerParams = savedCParams;
+        this.callerBase = savedCBase;
+        this.callerRootEnd = savedCRoot;
+        JsonValue v = heap JsonValue();
+        v.setStringOwned(#produced, m);
+        return #v;
+    }
+
+    void kwNamesStore(String[] arr, int32 i, String s) {
+        String own = "" + s;
+        arr[i] #= own;
+    }
+
+    /** caller(): render the {% call %} body with CALL-SITE visibility
+     *  plus the block's parameters bound to the given arguments. */
+    #JsonValue invokeCaller(int32 args, int32 line) {
+        if (this.callerBody < 0 && this.callerParams < 0) {
+            this.err("No caller defined", line);
+        }
+        // Evaluate caller() args in the MACRO's scope (they reference
+        // macro state), before restoring the call-site view.
+        int32 n = 0;
+        int32 a = args;
+        while (a >= 0) {
+            n = n + 1;
+            a = this.nd.nx(a);
+        }
+        JsonValue[] argVals = heap JsonValue[n + 1];
+        int32 i = 0;
+        a = args;
+        while (a >= 0) {
+            argVals[i] #= this.eval(a);
+            i = i + 1;
+            a = this.nd.nx(a);
+        }
+        int32 savedBase = this.macroBase;
+        int32 savedRoot = this.rootEnd;
+        int32 savedBody = this.callerBody;
+        int32 savedParams = this.callerParams;
+        this.macroBase = this.callerBase;
+        this.rootEnd = this.callerRootEnd;
+        this.callerBody = 0 - 1;
+        this.callerParams = 0 - 1;
+        int32 mark = this.beginScope();
+        int32 p = savedParams;
+        int32 pi = 0;
+        while (p >= 0) {
+            JsonValue bound = null;
+            if (pi < n) {
+                bound #= argVals[pi];
+            } else if (this.nd.a(p) >= 0) {
+                bound #= this.eval(this.nd.a(p));
+            }
+            this.push(this.nd.strOf(p), #bound);
+            pi = pi + 1;
+            p = this.nd.nx(p);
+        }
+        int32 outMark = this.out.n;
+        this.runChain(savedBody);
+        int32 m = this.out.n - outMark;
+        int8[] produced = heap int8[m];
+        int32 z = 0;
+        while (z < m) {
+            produced[z] = this.out.b[outMark + z];
+            z = z + 1;
+        }
+        this.out.n = outMark;
+        this.endScope(mark);
+        this.macroBase = savedBase;
+        this.rootEnd = savedRoot;
+        this.callerBody = savedBody;
+        this.callerParams = savedParams;
+        JsonValue v = heap JsonValue();
+        v.setStringOwned(#produced, m);
+        return #v;
     }
 
     #JsonValue evalRange(int32 args, int32 line) {

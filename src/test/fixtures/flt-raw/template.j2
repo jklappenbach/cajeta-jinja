@@ -1,0 +1,6 @@
+{% filter upper %}down {{ 'low' }}{% endfilter %}|{% filter replace('a', 'b') %}banana{% endfilter %}
+{% raw %}{{ not evaluated }} {% if %} {# x #}{% endraw %}
+a
+{%- raw %}R{% endraw -%}
+b
+{% filter trim %}  padded {{ 'x' }}  {% endfilter %}|end

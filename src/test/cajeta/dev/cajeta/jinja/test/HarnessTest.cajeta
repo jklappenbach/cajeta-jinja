@@ -164,16 +164,17 @@ public class HarnessTest {
     /** Spec 2.22 discipline from day one: a construct the engine cannot
      *  render fails LOUDLY, naming the construct and line — never
      *  renders something subtly wrong. The guard construct moves as
-     *  units land ({{ }} with Unit 3, statements with Unit 4); it sits
-     *  on `{% macro %}` until Unit 6, and fires at COMPILE time now
-     *  that parsing lives in Environment.compile (spec 5.2/5.3). */
+     *  units land ({{ }} with Unit 3, statements with Unit 4, macros
+     *  with Unit 6); it sits on `{% extends %}` (loader-backed
+     *  inheritance, spec 2.12) and fires at COMPILE time (spec
+     *  5.2/5.3). */
     @Test
     public void unsupportedConstructFailsLoudly() {
         Environment env = heap Environment();
         boolean threw = false;
         try {
             Template t #= env.compile(
-                "line one\n{% macro m() %}x{% endmacro %}\n");
+                "line one\n{% extends 'base.j2' %}\n");
             threw = t == null;   // unreachable
         } catch (JinjaException e) {
             threw = true;

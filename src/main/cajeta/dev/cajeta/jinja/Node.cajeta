@@ -32,6 +32,12 @@ final class Node {
     static final int32 N_WITH = 5;   // a = E_KWARG chain, b = body
     static final int32 N_BREAK = 6;
     static final int32 N_CONTINUE = 7;
+    static final int32 N_MACRO = 8;  // str = name, a = params chain
+                                     //   (E_KWARG: str = pname,
+                                     //    a = default|-1), b = body
+    static final int32 N_CALLBLK = 9; // a = the E_CALL, b = body,
+                                     // c = block params chain
+    static final int32 N_FILTBLK = 10; // str = filter, a = args, b = body
 
     // ── expression kinds ───────────────────────────────────────────────
     static final int32 E_STR = 10;   // str = unescaped value
