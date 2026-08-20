@@ -1,0 +1,7 @@
+{"messages": [
+  {"role": "system", "content": "Short answers."},
+  {"role": "user", "content": "Name a color."},
+  {"role": "assistant", "content": "Blue."},
+  {"role": "user", "content": "Another?"}
+ ],
+ "eos_token": "</s>", "add_generation_prompt": true}

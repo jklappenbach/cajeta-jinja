@@ -1,0 +1,8 @@
+{"messages": [
+  {"role": "system", "content": "Answer tersely."},
+  {"role": "user", "content": "What is 2+2?"},
+  {"role": "assistant", "content": "4."},
+  {"role": "user", "content": "And doubled?"}
+ ],
+ "bos_token": "<|begin_of_text|>",
+ "add_generation_prompt": true}

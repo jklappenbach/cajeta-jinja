@@ -1,0 +1,9 @@
+<|im_start|>system
+You are terse.<|im_end|>
+<|im_start|>user
+Ping?<|im_end|>
+<|im_start|>assistant
+Pong.<|im_end|>
+<|im_start|>user
+Again<|im_end|>
+<|im_start|>assistant

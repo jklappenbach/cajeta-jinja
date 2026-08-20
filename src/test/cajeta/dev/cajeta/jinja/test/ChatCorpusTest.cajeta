@@ -1,0 +1,33 @@
+package dev.cajeta.jinja.test;
+
+/**
+ * cajeta-jinja plan Unit 9.1.1 — the four target families' chat
+ * templates (verbatim from cajeta-llama's corpus) render byte-exact
+ * under the transformers settings (trim_blocks + lstrip_blocks on;
+ * llama3 additionally needs the injected clock for its date guard).
+ * Together with qwen3coder-tool (6.3.1) this is the spec-6.2 corpus.
+ */
+public class ChatCorpusTest {
+
+    public ChatCorpusTest() { return; }
+
+    @Test
+    public void llama3Matches() {
+        HarnessTest.renderAndCompare("chat-llama3");
+    }
+
+    @Test
+    public void mistralMatches() {
+        HarnessTest.renderAndCompare("chat-mistral");
+    }
+
+    @Test
+    public void qwen25Matches() {
+        HarnessTest.renderAndCompare("chat-qwen25");
+    }
+
+    @Test
+    public void tinyllamaMatches() {
+        HarnessTest.renderAndCompare("chat-tinyllama");
+    }
+}
