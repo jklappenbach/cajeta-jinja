@@ -1,0 +1,8 @@
+{{ words | map('upper') | join(',') }}|{{ people | map(attribute='name') | list }}
+{{ [1, 2, 3, 4] | select('odd') | list }}|{{ [0, 1, '', none, 'x'] | select | list }}
+{{ [1, 2, 3, 4] | reject('odd') | list }}|{{ [0, 1, ''] | reject | list }}
+{{ people | selectattr('age', 'eq', 30) | map(attribute='name') | list }}
+{{ people | rejectattr('age', 'eq', 30) | map(attribute='name') | list }}
+{{ people | selectattr('age') | list | length }}
+{% for age, group in people | groupby('age') %}{{ age }}:{% for p in group %}{{ p.name }} {% endfor %};{% endfor %}
+{{ [1, 2, 3] | map('float') | sum }}|{{ ['1', '2'] | map('int') | sum }}

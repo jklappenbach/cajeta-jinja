@@ -1,0 +1,163 @@
+package dev.cajeta.jinja.test;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.jinja.Environment;
+import dev.cajeta.jinja.Template;
+import dev.cajeta.jinja.JinjaException;
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonValue;
+import cajeta.lang.String;
+
+/**
+ * cajeta-jinja plan Unit 5 TDD — filters, tests, and globals.
+ *
+ * Oracle-pinned behaviours the fixtures carry (all probed against
+ * 3.1.6): `round` is Python's — HALF-EVEN for 'common' (2.5 -> 2.0,
+ * 3.5 -> 4.0); `length` counts CODEPOINTS, not bytes; `sort`/`min`/
+ * `max` compare strings case-insensitively by default; `title`
+ * capitalizes after '-' too; escape writes &#34;/&#39;; tojson
+ * \u-escapes < > & ' (HTML-safe json.dumps); bare builtin names are
+ * CALLABLE VALUES (`range is callable`, `strftime_now is defined` —
+ * the llama-3 date-guard lesson); `true is integer` is False;
+ * `cycler`/`joiner` are stateful objects.
+ *
+ * Documented divergences (in the plan): dictsort/items/groupby yield
+ * pairs that ITERATE correctly but PRINT as lists, not tuples; float
+ * text is exact only for dyadic values; lipsum is deterministic.
+ */
+public class FilterTest {
+
+    public FilterTest() { return; }
+
+    /** 5.1.1 — string filters. */
+    @Test
+    public void stringFiltersMatch() {
+        HarnessTest.renderAndCompare("flt-str");
+    }
+
+    /** 5.1.1 — numeric filters (round's banker's rounding included). */
+    @Test
+    public void numericFiltersMatch() {
+        HarnessTest.renderAndCompare("flt-num");
+    }
+
+    /** 5.1.1 — sequence filters: sort/unique/batch/dictsort/items/
+     *  join-with-attribute. */
+    @Test
+    public void sequenceFiltersMatch() {
+        HarnessTest.renderAndCompare("flt-seq");
+    }
+
+    /** 5.1.1 — map/select/reject (+attr variants) and groupby. */
+    @Test
+    public void selectionFiltersMatch() {
+        HarnessTest.renderAndCompare("flt-select");
+    }
+
+    /** 5.1.3 — tojson matches Python separators and \\uXXXX escaping. */
+    @Test
+    public void tojsonMatches() {
+        HarnessTest.renderAndCompare("flt-json");
+    }
+
+    /** 5.1.2 + globals — the test set, range/dict/cycler/joiner, and
+     *  strftime_now against the injected clock (5.1.5). */
+    @Test
+    public void testsAndGlobalsMatch() {
+        HarnessTest.renderAndCompare("tests-globals");
+    }
+
+    /** 5.1.4 — raise_exception surfaces the template's message. */
+    @Test
+    public void raiseExceptionCarriesMessage() {
+        Environment env = heap Environment();
+        JsonValue ctx #= Json.parse("{}");
+        Template t #= env.compile(
+            "{{ raise_exception('bad conversation shape') }}");
+        boolean threw = false;
+        try {
+            String out #= t.render(ctx);
+            threw = out == null;             // never
+        } catch (JinjaException e) {
+            threw = true;
+            Assert.isTrue(e.getMessage().contains(
+                "bad conversation shape"));
+        }
+        Assert.isTrue(threw);
+    }
+
+    /** 5.1.5 — strftime_now with no injected clock fails loudly, and
+     *  an unknown directive fails naming it. */
+    @Test
+    public void strftimeFailsLoudly() {
+        Environment env = heap Environment();
+        JsonValue ctx #= Json.parse("{}");
+        Template t #= env.compile("{{ strftime_now('%Y') }}");
+        boolean threw = false;
+        try {
+            String out #= t.render(ctx);     // no clock injected
+            threw = out == null;             // never
+        } catch (JinjaException e) {
+            threw = true;
+        }
+        Assert.isTrue(threw);
+
+        Environment env2 = heap Environment();
+        env2.nowEpochSeconds((int64) 1755600000);
+        Template t2 #= env2.compile("{{ strftime_now('%Q') }}");
+        boolean threw2 = false;
+        try {
+            String out2 #= t2.render(ctx);
+            threw2 = out2 == null;           // never
+        } catch (JinjaException e2) {
+            threw2 = true;
+        }
+        Assert.isTrue(threw2);
+    }
+
+    /** 5.3.1 — anything unimplemented fails LOUDLY by name (spec
+     *  2.22), never renders something plausible. */
+    @Test
+    public void unimplementedFailsByName() {
+        Environment env = heap Environment();
+        JsonValue ctx #= Json.parse("{}");
+
+        Template t #= env.compile("{{ 'x' | frobnicate }}");
+        boolean threw = false;
+        try {
+            String out #= t.render(ctx);
+            threw = out == null;             // never
+        } catch (JinjaException e) {
+            threw = true;
+            Assert.isTrue(e.getMessage().contains("frobnicate"));
+        }
+        Assert.isTrue(threw);
+
+        Template t2 #= env.compile("{{ 1 is frobnitzy }}");
+        boolean threw2 = false;
+        try {
+            String out2 #= t2.render(ctx);
+            threw2 = out2 == null;           // never
+        } catch (JinjaException e2) {
+            threw2 = true;
+            Assert.isTrue(e2.getMessage().contains("frobnitzy"));
+        }
+        Assert.isTrue(threw2);
+    }
+
+    /** lipsum: deterministic by design (Jinja's is random, so no
+     *  template can depend on its bytes) — pin the SHAPE. */
+    @Test
+    public void lipsumShape() {
+        Environment env = heap Environment();
+        JsonValue ctx #= Json.parse("{}");
+        Template t #= env.compile("{{ lipsum(2) }}");
+        String out #= t.render(ctx);
+        Assert.isTrue(out.startsWith("<p>"));
+        Assert.isTrue(out.contains("Lorem ipsum"));
+        Template t2 #= env.compile("{{ lipsum(1, false) }}");
+        String out2 #= t2.render(ctx);
+        Assert.isTrue(out2.startsWith("Lorem ipsum"));
+        Assert.isTrue(out2.contains("<p>") == false);
+    }
+}

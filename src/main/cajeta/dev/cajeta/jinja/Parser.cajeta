@@ -673,6 +673,32 @@ final class Parser {
                 }
                 if (this.atKind(Tok.K_LPAREN)) {
                     this.nd.setB(node, this.parseArgs());
+                } else {
+                    // Jinja's no-paren single test argument
+                    // (`is divisibleby 2`, `is in [1, 2]`): taken when
+                    // the next token can start a primary and is not a
+                    // chaining keyword (mirrors parse_test's arg_types
+                    // minus else/or/and).
+                    int32 nk = this.cur();
+                    boolean argish = nk == Tok.K_STRING
+                        || nk == Tok.K_NUMBER || nk == Tok.K_LBRACKET
+                        || nk == Tok.K_LBRACE;
+                    if (nk == Tok.K_NAME
+                            && this.wordIs(this.p, "else") == false
+                            && this.wordIs(this.p, "or") == false
+                            && this.wordIs(this.p, "and") == false
+                            && this.wordIs(this.p, "if") == false
+                            && this.wordIs(this.p, "in") == false
+                            && this.wordIs(this.p, "is") == false
+                            && this.wordIs(this.p, "not") == false
+                            && this.wordIs(this.p, "recursive") == false) {
+                        argish = true;
+                    }
+                    if (argish) {
+                        int32 arg = this.parsePrimary();
+                        arg = this.parsePostfix(arg);
+                        this.nd.setB(node, arg);
+                    }
                 }
                 v = node;
             } else if (k == Tok.K_LPAREN) {

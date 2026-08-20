@@ -1,0 +1,1409 @@
+package dev.cajeta.jinja;
+
+import cajeta.codec.json.JsonArray;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.lang.Math;
+import cajeta.lang.String;
+
+/**
+ * The builtin filter library (spec 2.17, plan 5.2.1). Dispatch by name;
+ * anything not implemented fails LOUDLY by name (spec 2.22 / plan
+ * 5.3.1), and so does an unknown keyword argument — an ignored
+ * `case_sensitive=true` would render something plausible and wrong.
+ *
+ * Oracle-pinned behaviours worth naming: `round` is Python's (HALF-EVEN
+ * for 'common'); `length`/`list`/`first`/`last`/`reverse` on strings
+ * are CODEPOINT-based; `sort`/`min`/`max`/`unique`/`dictsort`/`groupby`
+ * compare strings case-insensitively unless `case_sensitive=true`;
+ * `title` starts a word after `-([{<` too; `escape` writes
+ * &#34;/&#39;; `tojson` is HTML-safe json.dumps (< > & ' as \\uXXXX,
+ * non-ASCII escaped). `attr` reads Python ATTRIBUTES, which JsonValue
+ * objects don't have — it yields undefined, exactly as Jinja does on a
+ * dict (oracle-verified).
+ */
+final class Filters {
+
+    // ── argument plumbing ──────────────────────────────────────────────
+
+    /** Node of the pos-th positional arg or the kwarg named `name`
+     *  (its VALUE node); -1 when absent. */
+    static int32 argAt(Eval ev, int32 args, int32 pos, String name) {
+        int32 a = args;
+        int32 seen = 0;
+        while (a >= 0) {
+            if (ev.nd.k(a) == Node.E_KWARG) {
+                if (name != null && ev.nd.strOf(a).equals(name)) {
+                    return ev.nd.a(a);
+                }
+            } else {
+                if (seen == pos) {
+                    return a;
+                }
+                seen = seen + 1;
+            }
+            a = ev.nd.nx(a);
+        }
+        return 0 - 1;
+    }
+
+    /** Reject kwargs outside `allowed` (comma-separated). */
+    static void checkKwargs(Eval ev, int32 args, String allowed,
+            String filter, int32 line) {
+        int32 a = args;
+        while (a >= 0) {
+            if (ev.nd.k(a) == Node.E_KWARG) {
+                String nm = ev.nd.strOf(a);
+                String padded = "," + allowed + ",";
+                if (padded.contains("," + nm + ",") == false) {
+                    ev.err("filter '" + filter
+                        + "': unsupported keyword argument '" + nm
+                        + "'", line);
+                }
+            }
+            a = ev.nd.nx(a);
+        }
+    }
+
+    static boolean argTruthy(Eval ev, int32 node, int32 line,
+            boolean dflt) {
+        if (node < 0) {
+            return dflt;
+        }
+        JsonValue v #= ev.eval(node);
+        return ev.truthy(v, line);
+    }
+
+    static int64 argInt(Eval ev, int32 node, int32 line, int64 dflt) {
+        if (node < 0) {
+            return dflt;
+        }
+        JsonValue v #= ev.eval(node);
+        if (Eval.isNumberish(v) == false) {
+            ev.err("expected an integer argument", line);
+        }
+        return Eval.toI64(v);
+    }
+
+    // ── codepoint helpers (UTF-8) ──────────────────────────────────────
+
+    static int32 cpCount(int8[] b, int32 n) {
+        int32 c = 0;
+        int32 i = 0;
+        while (i < n) {
+            int32 x = ((int32) b[i]) & 255;
+            if (x < 128 || x >= 192) {
+                c = c + 1;
+            }
+            i = i + 1;
+        }
+        return c;
+    }
+
+    /** Split a STRING value into one-codepoint String values. */
+    static #JsonArray cpChars(JsonValue v) {
+        JsonArray out = heap JsonArray();
+        int8[] b = v.asBytes();
+        int32 n = v.asBytesLength();
+        int32 i = 0;
+        while (i < n) {
+            int32 len = 1;
+            int32 x = ((int32) b[i]) & 255;
+            if (x >= 240) { len = 4; }
+            else if (x >= 224) { len = 3; }
+            else if (x >= 192) { len = 2; }
+            if (i + len > n) {
+                len = n - i;
+            }
+            int8[] one = heap int8[len];
+            int32 j = 0;
+            while (j < len) {
+                one[j] = b[i + j];
+                j = j + 1;
+            }
+            JsonValue cv = heap JsonValue();
+            cv.setStringOwned(#one, len);
+            out.add(#cv);
+            i = i + len;
+        }
+        return #out;
+    }
+
+    // ── iteration base ─────────────────────────────────────────────────
+
+    /** Value -> owned item array: arrays copy, strings split to chars,
+     *  mappings yield keys; anything else is an error. */
+    static #JsonArray toItems(Eval ev, JsonValue v, int32 line) {
+        JsonArray out = heap JsonArray();
+        if (v == null) {
+            if (ev.strict) {
+                ev.undefErr(line);
+            }
+            return #out;
+        }
+        int32 k = v.kind();
+        if (k == JsonValue.ARRAY) {
+            JsonArray src = v.array();
+            int32 i = 0;
+            while (i < src.count()) {
+                out.add(Eval.copy(src.get(i)));
+                i = i + 1;
+            }
+            return #out;
+        }
+        if (k == JsonValue.STRING) {
+            return #Filters.cpChars(v);
+        }
+        if (k == JsonValue.OBJECT) {
+            JsonObject o = v.object();
+            int32 j = 0;
+            while (j < o.count()) {
+                String key #= Eval.keyOf(o, j);
+                out.add(Eval.str(key));
+                j = j + 1;
+            }
+            return #out;
+        }
+        ev.err("value is not iterable", line);
+        return #out;                         // unreachable
+    }
+
+    /** Dotted attribute path over objects; null (undefined) on a miss. */
+    static #JsonValue attrPath(Eval ev, JsonValue item, String path,
+            int32 line) {
+        JsonValue cur #= Eval.copy(item);
+        int32 from = 0;
+        int32 n = path.byteLength();
+        int32 i = 0;
+        while (i <= n) {
+            if (i == n || path.byteAt(i) == 46) {
+                String part #= path.substring(from, i);
+                if (cur == null || cur.kind() != JsonValue.OBJECT) {
+                    return null;
+                }
+                JsonValue got = cur.object().get(part);
+                if (got == null) {
+                    return null;
+                }
+                cur #= Eval.copy(got);
+                from = i + 1;
+            }
+            i = i + 1;
+        }
+        return #= cur;
+    }
+
+    // ── comparisons for sort/min/max ───────────────────────────────────
+
+    static #String lowerAscii(String s) {
+        Buf b = heap Buf();
+        int32 n = s.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            int32 c = s.byteAt(i) & 255;
+            if (c >= 65 && c <= 90) {
+                c = c + 32;
+            }
+            b.addByte(c);
+            i = i + 1;
+        }
+        return #b.take();
+    }
+
+    /** -1/0/1 with Jinja's default string folding. */
+    static int32 cmpKeys(Eval ev, JsonValue a, JsonValue b, boolean ci,
+            int32 line) {
+        if (a != null && b != null
+                && a.kind() == JsonValue.STRING
+                && b.kind() == JsonValue.STRING && ci) {
+            String la #= Filters.lowerAscii(a.asString());
+            String lb #= Filters.lowerAscii(b.asString());
+            JsonValue va #= Eval.str(la);
+            JsonValue vb #= Eval.str(lb);
+            return ev.ordCmp(va, vb, line);
+        }
+        return ev.ordCmp(a, b, line);
+    }
+
+    /** Stable insertion sort by extracted keys; returns a NEW array. */
+    static #JsonArray sortItems(Eval ev, JsonArray items, String attribute,
+            boolean ci, boolean rev, int32 line) {
+        int32 n = items.count();
+        JsonArray keys = heap JsonArray();
+        int32 i = 0;
+        while (i < n) {
+            if (attribute == null) {
+                keys.add(Eval.copy(items.get(i)));
+            } else {
+                JsonValue kv #= Filters.attrPath(ev, items.get(i),
+                    attribute, line);
+                if (kv == null) {
+                    ev.err("sort attribute '" + attribute
+                        + "' is undefined on an item", line);
+                }
+                keys.add(#kv);
+            }
+            i = i + 1;
+        }
+        // Index sort, then rebuild both arrays in order.
+        int32[] idx = heap int32[n];
+        i = 0;
+        while (i < n) {
+            idx[i] = i;
+            i = i + 1;
+        }
+        i = 1;
+        while (i < n) {
+            int32 j = i;
+            while (j > 0) {
+                int32 c = Filters.cmpKeys(ev, keys.get(idx[j - 1]),
+                    keys.get(idx[j]), ci, line);
+                boolean swap = c > 0;
+                if (rev) {
+                    swap = c < 0;
+                }
+                if (swap) {
+                    int32 t = idx[j - 1];
+                    idx[j - 1] = idx[j];
+                    idx[j] = t;
+                    j = j - 1;
+                } else {
+                    j = 0;
+                }
+            }
+            i = i + 1;
+        }
+        JsonArray sorted = heap JsonArray();
+        i = 0;
+        while (i < n) {
+            sorted.add(Eval.copy(items.get(idx[i])));
+            i = i + 1;
+        }
+        return #sorted;
+    }
+
+    static #JsonValue wrapArray(#JsonArray a) {
+        JsonValue v = heap JsonValue();
+        v.setArray(#a);
+        return #v;
+    }
+
+    // ── the dispatcher ─────────────────────────────────────────────────
+
+    static #JsonValue apply(Eval ev, String name, JsonValue v,
+            int32 args, int32 line) {
+        if (name.equals("upper")) {
+            String s #= ev.text(v, line);
+            return #Eval.str(s.toUpperCase());
+        }
+        if (name.equals("lower")) {
+            String s #= ev.text(v, line);
+            return #Eval.str(s.toLowerCase());
+        }
+        if (name.equals("trim")) {
+            String s #= ev.text(v, line);
+            return #Eval.str(s.trim());
+        }
+        if (name.equals("capitalize")) {
+            String s #= ev.text(v, line);
+            Buf b = heap Buf();
+            int32 n = s.byteLength();
+            int32 i = 0;
+            while (i < n) {
+                int32 c = s.byteAt(i) & 255;
+                if (i == 0) {
+                    if (c >= 97 && c <= 122) { c = c - 32; }
+                } else {
+                    if (c >= 65 && c <= 90) { c = c + 32; }
+                }
+                b.addByte(c);
+                i = i + 1;
+            }
+            return #Eval.str(b.take());
+        }
+        if (name.equals("title")) {
+            String s #= ev.text(v, line);
+            Buf b = heap Buf();
+            int32 n = s.byteLength();
+            boolean atStart = true;
+            int32 i = 0;
+            while (i < n) {
+                int32 c = s.byteAt(i) & 255;
+                boolean boundary = c == 32 || c == 9 || c == 10
+                    || c == 13 || c == 45 || c == 40 || c == 123
+                    || c == 91 || c == 60;
+                if (boundary) {
+                    atStart = true;
+                } else if (atStart) {
+                    if (c >= 97 && c <= 122) { c = c - 32; }
+                    atStart = false;
+                } else {
+                    if (c >= 65 && c <= 90) { c = c + 32; }
+                }
+                b.addByte(c);
+                i = i + 1;
+            }
+            return #Eval.str(b.take());
+        }
+        if (name.equals("wordcount")) {
+            String s #= ev.text(v, line);
+            int32 n = s.byteLength();
+            int32 count = 0;
+            boolean inWord = false;
+            int32 i = 0;
+            while (i < n) {
+                int32 c = s.byteAt(i) & 255;
+                boolean ws = c == 32 || c == 9 || c == 10 || c == 13;
+                if (ws) {
+                    inWord = false;
+                } else if (inWord == false) {
+                    count = count + 1;
+                    inWord = true;
+                }
+                i = i + 1;
+            }
+            return #Eval.num((int64) count);
+        }
+        if (name.equals("replace")) {
+            int32 a0 = Filters.argAt(ev, args, 0, null);
+            int32 a1 = Filters.argAt(ev, args, 1, null);
+            if (a0 < 0 || a1 < 0) {
+                ev.err("replace needs two arguments", line);
+            }
+            String from #= ev.argText(a0, line);
+            String to #= ev.argText(a1, line);
+            String s #= ev.text(v, line);
+            return #Eval.str(Eval.replaceAll(s, from, to));
+        }
+        if (name.equals("indent")) {
+            Filters.checkKwargs(ev, args, "width,first", "indent", line);
+            int32 width = (int32) Filters.argInt(ev,
+                Filters.argAt(ev, args, 0, "width"), line, 4);
+            boolean first = Filters.argTruthy(ev,
+                Filters.argAt(ev, args, 1, "first"), line, false);
+            String s #= ev.text(v, line);
+            Buf b = heap Buf();
+            int32 n = s.byteLength();
+            boolean atLineStart = true;
+            boolean isFirstLine = true;
+            int32 i = 0;
+            while (i < n) {
+                int32 c = s.byteAt(i) & 255;
+                if (atLineStart) {
+                    if (isFirstLine == false || first) {
+                        int32 w = 0;
+                        while (w < width) {
+                            b.addByte(32);
+                            w = w + 1;
+                        }
+                    }
+                    atLineStart = false;
+                }
+                b.addByte(c);
+                if (c == 10) {
+                    atLineStart = true;
+                    isFirstLine = false;
+                }
+                i = i + 1;
+            }
+            return #Eval.str(b.take());
+        }
+        if (name.equals("striptags")) {
+            String s #= ev.text(v, line);
+            Buf b = heap Buf();
+            int32 n = s.byteLength();
+            boolean inTag = false;
+            boolean pendingWs = false;
+            boolean any = false;
+            int32 i = 0;
+            while (i < n) {
+                int32 c = s.byteAt(i) & 255;
+                if (inTag) {
+                    if (c == 62) { inTag = false; }
+                } else if (c == 60) {
+                    inTag = true;
+                } else if (c == 32 || c == 9 || c == 10 || c == 13) {
+                    pendingWs = true;
+                } else {
+                    if (pendingWs && any) {
+                        b.addByte(32);
+                    }
+                    pendingWs = false;
+                    b.addByte(c);
+                    any = true;
+                }
+                i = i + 1;
+            }
+            return #Eval.str(b.take());
+        }
+        if (name.equals("escape") || name.equals("e")) {
+            String s #= ev.text(v, line);
+            return #Eval.str(Filters.htmlEscape(s));
+        }
+        if (name.equals("safe")) {
+            // Identity while autoescape is off (Unit 7 adds marking).
+            String s #= ev.text(v, line);
+            return #Eval.str(s);
+        }
+        if (name.equals("format")) {
+            String s #= ev.text(v, line);
+            return #Filters.pformat(ev, s, args, line);
+        }
+        if (name.equals("string")) {
+            String s #= ev.text(v, line);
+            return #Eval.str(s);
+        }
+        if (name.equals("default") || name.equals("d")) {
+            int32 dflt = Filters.argAt(ev, args, 0, "default_value");
+            boolean falsy = Filters.argTruthy(ev,
+                Filters.argAt(ev, args, 1, "boolean"), line, false);
+            boolean use = v == null;
+            if (falsy) {
+                use = ev.truthy(v, line) == false;
+            }
+            if (use) {
+                if (dflt < 0) {
+                    return #Eval.str("");
+                }
+                return #ev.eval(dflt);
+            }
+            return #Eval.copy(v);
+        }
+        if (name.equals("length") || name.equals("count")) {
+            if (v != null && v.kind() == JsonValue.STRING) {
+                return #Eval.num((int64) Filters.cpCount(v.asBytes(),
+                    v.asBytesLength()));
+            }
+            if (v != null && v.kind() == JsonValue.ARRAY) {
+                return #Eval.num((int64) v.array().count());
+            }
+            if (v != null && v.kind() == JsonValue.OBJECT) {
+                return #Eval.num((int64) v.object().count());
+            }
+            ev.err("value has no length", line);
+        }
+        if (name.equals("abs")) {
+            if (Eval.isNumberish(v) == false) {
+                ev.err("abs needs a number", line);
+            }
+            if (Eval.isFloaty(v)) {
+                float64 f = v.asFloat64();
+                if (f < 0.0) { f = 0.0 - f; }
+                return #Eval.flt(f);
+            }
+            int64 x = Eval.toI64(v);
+            if (x < 0) { x = 0 - x; }
+            return #Eval.num(x);
+        }
+        if (name.equals("int")) {
+            int64 dflt = Filters.argInt(ev,
+                Filters.argAt(ev, args, 0, "default"), line, 0);
+            return #Filters.toIntF(v, dflt);
+        }
+        if (name.equals("float")) {
+            int32 dn = Filters.argAt(ev, args, 0, "default");
+            float64 dflt = 0.0;
+            if (dn >= 0) {
+                JsonValue dv #= ev.eval(dn);
+                if (Eval.isNumberish(dv)) {
+                    dflt = Eval.toF64(dv);
+                }
+            }
+            return #Filters.toFloatF(v, dflt);
+        }
+        if (name.equals("round")) {
+            Filters.checkKwargs(ev, args, "precision,method", "round",
+                line);
+            int32 prec = (int32) Filters.argInt(ev,
+                Filters.argAt(ev, args, 0, "precision"), line, 0);
+            String method = "common";
+            int32 mNode = Filters.argAt(ev, args, 1, "method");
+            if (mNode >= 0) {
+                String m #= ev.argText(mNode, line);
+                method = "" + m;
+            }
+            if (Eval.isNumberish(v) == false) {
+                ev.err("round needs a number", line);
+            }
+            float64 x = Eval.toF64(v);
+            float64 scale = 1.0;
+            int32 pp = 0;
+            while (pp < prec) {
+                scale = scale * 10.0;
+                pp = pp + 1;
+            }
+            float64 sx = x * scale;
+            float64 r = 0.0;
+            if (method.equals("ceil")) {
+                r = Math.ceil(sx);
+            } else if (method.equals("floor")) {
+                r = Math.floor(sx);
+            } else if (method.equals("common")) {
+                // Python round(): HALF-EVEN (2.5 -> 2, 3.5 -> 4).
+                float64 fl = Math.floor(sx);
+                float64 frac = sx - fl;
+                if (frac > 0.5) {
+                    r = fl + 1.0;
+                } else if (frac < 0.5) {
+                    r = fl;
+                } else {
+                    int64 fi = (int64) fl;
+                    if (fi % 2 == 0) { r = fl; } else { r = fl + 1.0; }
+                }
+            } else {
+                ev.err("round: unknown method '" + method + "'", line);
+            }
+            return #Eval.flt(r / scale);
+        }
+        if (name.equals("sum")) {
+            Filters.checkKwargs(ev, args, "attribute,start", "sum",
+                line);
+            int32 attrN = Filters.argAt(ev, args, 0, "attribute");
+            String attribute = null;
+            if (attrN >= 0) {
+                String at #= ev.argText(attrN, line);
+                attribute = "" + at;
+            }
+            JsonArray items #= Filters.toItems(ev, v, line);
+            int64 si = Filters.argInt(ev,
+                Filters.argAt(ev, args, 1, "start"), line, 0);
+            int64 accI = si;
+            float64 accF = (float64) si;
+            boolean anyFloat = false;
+            int32 i = 0;
+            while (i < items.count()) {
+                JsonValue item = items.get(i);
+                JsonValue val = item;
+                JsonValue owned = null;
+                if (attribute != null) {
+                    owned #= Filters.attrPath(ev, item, attribute, line);
+                    val = owned;
+                }
+                if (Eval.isNumberish(val) == false) {
+                    ev.err("sum over a non-numeric item", line);
+                }
+                if (Eval.isFloaty(val)) {
+                    anyFloat = true;
+                }
+                accI = accI + Eval.toI64(val);
+                accF = accF + Eval.toF64(val);
+                i = i + 1;
+            }
+            if (anyFloat) {
+                return #Eval.flt(accF);
+            }
+            return #Eval.num(accI);
+        }
+        if (name.equals("first") || name.equals("last")) {
+            JsonArray items #= Filters.toItems(ev, v, line);
+            if (items.count() == 0) {
+                return null;                 // undefined
+            }
+            if (name.equals("first")) {
+                return #Eval.copy(items.get(0));
+            }
+            return #Eval.copy(items.get(items.count() - 1));
+        }
+        if (name.equals("list")) {
+            return #Filters.wrapArray(Filters.toItems(ev, v, line));
+        }
+        if (name.equals("reverse")) {
+            if (v != null && v.kind() == JsonValue.STRING) {
+                JsonArray chars #= Filters.cpChars(v);
+                Buf b = heap Buf();
+                int32 i = chars.count() - 1;
+                while (i >= 0) {
+                    String c #= chars.get(i).asString();
+                    b.addStr(c);
+                    i = i - 1;
+                }
+                return #Eval.str(b.take());
+            }
+            JsonArray items #= Filters.toItems(ev, v, line);
+            JsonArray out = heap JsonArray();
+            int32 i = items.count() - 1;
+            while (i >= 0) {
+                out.add(Eval.copy(items.get(i)));
+                i = i - 1;
+            }
+            return #Filters.wrapArray(#out);
+        }
+        if (name.equals("join")) {
+            Filters.checkKwargs(ev, args, "attribute", "join", line);
+            String sep = "";
+            int32 sepN = Filters.argAt(ev, args, 0, null);
+            if (sepN >= 0) {
+                String sp #= ev.argText(sepN, line);
+                sep = "" + sp;
+            }
+            int32 attrN = Filters.argAt(ev, args, 9999, "attribute");
+            JsonArray items #= Filters.toItems(ev, v, line);
+            Buf b = heap Buf();
+            int32 i = 0;
+            while (i < items.count()) {
+                if (i > 0) {
+                    b.addStr(sep);
+                }
+                JsonValue item = items.get(i);
+                if (attrN >= 0) {
+                    String path #= ev.argText(attrN, line);
+                    JsonValue av #= Filters.attrPath(ev, item, path,
+                        line);
+                    String t #= ev.text(av, line);
+                    b.addStr(t);
+                } else {
+                    String t2 #= ev.text(item, line);
+                    b.addStr(t2);
+                }
+                i = i + 1;
+            }
+            return #Eval.str(b.take());
+        }
+        if (name.equals("batch")) {
+            int32 sz = (int32) Filters.argInt(ev,
+                Filters.argAt(ev, args, 0, "linecount"), line, 1);
+            int32 fillN = Filters.argAt(ev, args, 1, "fill_with");
+            JsonArray items #= Filters.toItems(ev, v, line);
+            JsonArray rows = heap JsonArray();
+            int32 i = 0;
+            while (i < items.count()) {
+                JsonArray row = heap JsonArray();
+                int32 j = 0;
+                while (j < sz && i + j < items.count()) {
+                    row.add(Eval.copy(items.get(i + j)));
+                    j = j + 1;
+                }
+                if (fillN >= 0) {
+                    while (j < sz) {
+                        JsonValue fv #= ev.eval(fillN);
+                        if (fv == null) {
+                            fv = heap JsonValue();
+                            fv.setNull();
+                        }
+                        row.add(#fv);
+                        j = j + 1;
+                    }
+                }
+                JsonValue rv = heap JsonValue();
+                rv.setArray(#row);
+                rows.add(#rv);
+                i = i + sz;
+            }
+            return #Filters.wrapArray(#rows);
+        }
+        if (name.equals("unique")) {
+            Filters.checkKwargs(ev, args, "case_sensitive", "unique",
+                line);
+            boolean cs = Filters.argTruthy(ev,
+                Filters.argAt(ev, args, 0, "case_sensitive"), line,
+                false);
+            JsonArray items #= Filters.toItems(ev, v, line);
+            JsonArray out = heap JsonArray();
+            JsonArray seen = heap JsonArray();
+            int32 i = 0;
+            while (i < items.count()) {
+                JsonValue item = items.get(i);
+                JsonValue key #= Filters.foldKey(item, cs);
+                boolean dup = false;
+                int32 j = 0;
+                while (j < seen.count()) {
+                    if (ev.eq(seen.get(j), key, line)) {
+                        dup = true;
+                        j = seen.count();
+                    } else {
+                        j = j + 1;
+                    }
+                }
+                if (dup == false) {
+                    seen.add(Eval.copy(key));
+                    out.add(Eval.copy(item));
+                }
+                i = i + 1;
+            }
+            return #Filters.wrapArray(#out);
+        }
+        if (name.equals("min") || name.equals("max")) {
+            Filters.checkKwargs(ev, args, "attribute,case_sensitive",
+                name, line);
+            boolean cs = Filters.argTruthy(ev,
+                Filters.argAt(ev, args, 0, "case_sensitive"), line,
+                false);
+            int32 attrN = Filters.argAt(ev, args, 9999, "attribute");
+            String attribute = null;
+            if (attrN >= 0) {
+                String at #= ev.argText(attrN, line);
+                attribute = "" + at;
+            }
+            JsonArray items #= Filters.toItems(ev, v, line);
+            if (items.count() == 0) {
+                return null;                 // undefined, as Jinja
+            }
+            int32 best = 0;
+            int32 i = 1;
+            while (i < items.count()) {
+                JsonValue ka #= Filters.sortKeyOf(ev, items.get(i),
+                    attribute, line);
+                JsonValue kb #= Filters.sortKeyOf(ev, items.get(best),
+                    attribute, line);
+                int32 c = Filters.cmpKeys(ev, ka, kb, cs == false,
+                    line);
+                boolean take = c < 0;
+                if (name.equals("max")) {
+                    take = c > 0;
+                }
+                if (take) {
+                    best = i;
+                }
+                i = i + 1;
+            }
+            return #Eval.copy(items.get(best));
+        }
+        if (name.equals("sort")) {
+            Filters.checkKwargs(ev, args,
+                "attribute,reverse,case_sensitive", "sort", line);
+            boolean rev = Filters.argTruthy(ev,
+                Filters.argAt(ev, args, 0, "reverse"), line, false);
+            boolean cs = Filters.argTruthy(ev,
+                Filters.argAt(ev, args, 1, "case_sensitive"), line,
+                false);
+            int32 attrN = Filters.argAt(ev, args, 9999, "attribute");
+            String attribute = null;
+            if (attrN >= 0) {
+                String at #= ev.argText(attrN, line);
+                attribute = "" + at;
+            }
+            JsonArray items #= Filters.toItems(ev, v, line);
+            JsonArray sorted #= Filters.sortItems(ev, items, attribute,
+                cs == false, rev, line);
+            return #Filters.wrapArray(#sorted);
+        }
+        if (name.equals("dictsort")) {
+            Filters.checkKwargs(ev, args, "case_sensitive,by",
+                "dictsort", line);
+            if (v == null || v.kind() != JsonValue.OBJECT) {
+                ev.err("dictsort needs a mapping", line);
+            }
+            boolean cs = Filters.argTruthy(ev,
+                Filters.argAt(ev, args, 0, "case_sensitive"), line,
+                false);
+            String by = "key";
+            int32 byN = Filters.argAt(ev, args, 1, "by");
+            if (byN >= 0) {
+                String b2 #= ev.argText(byN, line);
+                by = "" + b2;
+            }
+            JsonObject o = v.object();
+            JsonArray pairs = heap JsonArray();
+            int32 j = 0;
+            while (j < o.count()) {
+                String key #= Eval.keyOf(o, j);
+                JsonArray pair = heap JsonArray();
+                pair.add(Eval.str(key));
+                pair.add(Eval.copy(o.valueAt(j)));
+                JsonValue pv = heap JsonValue();
+                pv.setArray(#pair);
+                pairs.add(#pv);
+                j = j + 1;
+            }
+            if (by.equals("value") == false
+                    && by.equals("key") == false) {
+                ev.err("dictsort: by must be 'key' or 'value'", line);
+            }
+            JsonArray sorted #= Filters.sortPairs(ev, pairs,
+                by.equals("value"), cs == false, line);
+            return #Filters.wrapArray(#sorted);
+        }
+        if (name.equals("items")) {
+            if (v == null || v.kind() != JsonValue.OBJECT) {
+                ev.err("items needs a mapping", line);
+            }
+            JsonObject o = v.object();
+            JsonArray pairs = heap JsonArray();
+            int32 j = 0;
+            while (j < o.count()) {
+                String key #= Eval.keyOf(o, j);
+                JsonArray pair = heap JsonArray();
+                pair.add(Eval.str(key));
+                pair.add(Eval.copy(o.valueAt(j)));
+                JsonValue pv = heap JsonValue();
+                pv.setArray(#pair);
+                pairs.add(#pv);
+                j = j + 1;
+            }
+            return #Filters.wrapArray(#pairs);
+        }
+        if (name.equals("attr")) {
+            // Python ATTRIBUTE lookup — JsonValue objects have none, so
+            // this is undefined, exactly as Jinja on a dict.
+            return null;
+        }
+        if (name.equals("groupby")) {
+            if (args < 0) {
+                ev.err("groupby needs an attribute", line);
+            }
+            String at #= ev.argText(args, line);
+            String attribute = "" + at;
+            JsonArray raw #= Filters.toItems(ev, v, line);
+            JsonArray items #= Filters.sortItems(ev, raw, attribute,
+                true, false, line);
+            JsonArray groups = heap JsonArray();
+            int32 i = 0;
+            while (i < items.count()) {
+                JsonValue g #= Filters.attrPath(ev, items.get(i),
+                    attribute, line);
+                JsonArray members = heap JsonArray();
+                members.add(Eval.copy(items.get(i)));
+                int32 j = i + 1;
+                while (j < items.count()) {
+                    JsonValue g2 #= Filters.attrPath(ev, items.get(j),
+                        attribute, line);
+                    if (ev.eq(g, g2, line)) {
+                        members.add(Eval.copy(items.get(j)));
+                        j = j + 1;
+                    } else {
+                        break;
+                    }
+                }
+                JsonArray pair = heap JsonArray();
+                if (g == null) {
+                    JsonValue nv = heap JsonValue();
+                    nv.setNull();
+                    pair.add(#nv);
+                } else {
+                    pair.add(Eval.copy(g));
+                }
+                JsonValue mv = heap JsonValue();
+                mv.setArray(#members);
+                pair.add(#mv);
+                JsonValue pv = heap JsonValue();
+                pv.setArray(#pair);
+                groups.add(#pv);
+                i = j;
+            }
+            return #Filters.wrapArray(#groups);
+        }
+        if (name.equals("map")) {
+            JsonArray items #= Filters.toItems(ev, v, line);
+            JsonArray out = heap JsonArray();
+            int32 attrN = Filters.argAt(ev, args, 9999, "attribute");
+            if (attrN >= 0) {
+                String path #= ev.argText(attrN, line);
+                int32 i = 0;
+                while (i < items.count()) {
+                    JsonValue av #= Filters.attrPath(ev, items.get(i),
+                        path, line);
+                    if (av == null) {
+                        out.add(#Filters.mintNull());
+                    } else {
+                        out.add(#av);
+                    }
+                    i = i + 1;
+                }
+                return #Filters.wrapArray(#out);
+            }
+            if (args < 0) {
+                ev.err("map needs a filter name or attribute=", line);
+            }
+            String fname #= ev.argText(args, line);
+            int32 rest = ev.nd.nx(args);
+            int32 i2 = 0;
+            while (i2 < items.count()) {
+                JsonValue r #= Filters.apply(ev, fname, items.get(i2),
+                    rest, line);
+                if (r == null) {
+                    out.add(#Filters.mintNull());
+                } else {
+                    out.add(#r);
+                }
+                i2 = i2 + 1;
+            }
+            return #Filters.wrapArray(#out);
+        }
+        if (name.equals("select") || name.equals("reject")) {
+            boolean keepTruthy = name.equals("select");
+            JsonArray items #= Filters.toItems(ev, v, line);
+            JsonArray out = heap JsonArray();
+            String tname = null;
+            int32 rest = 0 - 1;
+            if (args >= 0) {
+                String t #= ev.argText(args, line);
+                tname = "" + t;
+                rest = ev.nd.nx(args);
+            }
+            int32 i = 0;
+            while (i < items.count()) {
+                boolean ok = false;
+                if (tname == null) {
+                    ok = ev.truthy(items.get(i), line);
+                } else {
+                    ok = ev.applyTest(tname, items.get(i), rest, line);
+                }
+                if (ok == keepTruthy) {
+                    out.add(Eval.copy(items.get(i)));
+                }
+                i = i + 1;
+            }
+            return #Filters.wrapArray(#out);
+        }
+        if (name.equals("selectattr") || name.equals("rejectattr")) {
+            boolean keep = name.equals("selectattr");
+            if (args < 0) {
+                ev.err(name + " needs an attribute", line);
+            }
+            String at #= ev.argText(args, line);
+            String path = "" + at;
+            int32 tnode = ev.nd.nx(args);
+            String tname = null;
+            int32 rest = 0 - 1;
+            if (tnode >= 0) {
+                String t #= ev.argText(tnode, line);
+                tname = "" + t;
+                rest = ev.nd.nx(tnode);
+            }
+            JsonArray items #= Filters.toItems(ev, v, line);
+            JsonArray out = heap JsonArray();
+            int32 i = 0;
+            while (i < items.count()) {
+                JsonValue av #= Filters.attrPath(ev, items.get(i),
+                    path, line);
+                boolean ok = false;
+                if (tname == null) {
+                    ok = ev.truthy(av, line);
+                } else {
+                    ok = ev.applyTest(tname, av, rest, line);
+                }
+                if (ok == keep) {
+                    out.add(Eval.copy(items.get(i)));
+                }
+                i = i + 1;
+            }
+            return #Filters.wrapArray(#out);
+        }
+        if (name.equals("tojson")) {
+            Filters.checkKwargs(ev, args, "indent", "tojson", line);
+            boolean indent = Filters.argAt(ev, args, 0, "indent") >= 0;
+            Buf b = heap Buf();
+            Filters.writeJson(ev, b, v, indent, 0, line);
+            return #Eval.str(b.take());
+        }
+        ev.err("unsupported filter '" + name + "'", line);
+        return null;                         // unreachable
+    }
+
+    static #JsonValue mintNull() {
+        JsonValue nv = heap JsonValue();
+        nv.setNull();
+        return #nv;
+    }
+
+    /** unique/min/max fold: case-insensitive string key by default. */
+    static #JsonValue foldKey(JsonValue v, boolean caseSensitive) {
+        if (caseSensitive == false && v != null
+                && v.kind() == JsonValue.STRING) {
+            String lo #= Filters.lowerAscii(v.asString());
+            return #Eval.str(lo);
+        }
+        return #Eval.copy(v);
+    }
+
+    static #JsonValue sortKeyOf(Eval ev, JsonValue item,
+            String attribute, int32 line) {
+        if (attribute == null) {
+            return #Eval.copy(item);
+        }
+        return #Filters.attrPath(ev, item, attribute, line);
+    }
+
+    /** dictsort's pair sort (key or value position); returns NEW. */
+    static #JsonArray sortPairs(Eval ev, JsonArray pairs,
+            boolean byValue, boolean ci, int32 line) {
+        int32 pos = 0;
+        if (byValue) {
+            pos = 1;
+        }
+        int32 n = pairs.count();
+        int32[] idx = heap int32[n];
+        int32 i = 0;
+        while (i < n) {
+            idx[i] = i;
+            i = i + 1;
+        }
+        i = 1;
+        while (i < n) {
+            int32 j = i;
+            while (j > 0) {
+                JsonValue a = pairs.get(idx[j - 1]).array().get(pos);
+                JsonValue b = pairs.get(idx[j]).array().get(pos);
+                if (Filters.cmpKeys(ev, a, b, ci, line) > 0) {
+                    int32 t = idx[j - 1];
+                    idx[j - 1] = idx[j];
+                    idx[j] = t;
+                    j = j - 1;
+                } else {
+                    j = 0;
+                }
+            }
+            i = i + 1;
+        }
+        JsonArray sorted = heap JsonArray();
+        i = 0;
+        while (i < n) {
+            sorted.add(Eval.copy(pairs.get(idx[i])));
+            i = i + 1;
+        }
+        return #sorted;
+    }
+
+    static #String htmlEscape(String s) {
+        Buf b = heap Buf();
+        int32 n = s.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            int32 c = s.byteAt(i) & 255;
+            if (c == 38) { b.addStr("&amp;"); }
+            else if (c == 60) { b.addStr("&lt;"); }
+            else if (c == 62) { b.addStr("&gt;"); }
+            else if (c == 34) { b.addStr("&#34;"); }
+            else if (c == 39) { b.addStr("&#39;"); }
+            else { b.addByte(c); }
+            i = i + 1;
+        }
+        return #b.take();
+    }
+
+    /** Python %-formatting, the subset templates use: %s %d %i %f
+     *  %.Nf %x %% — loud on anything else. */
+    static #JsonValue pformat(Eval ev, String fmt, int32 args,
+            int32 line) {
+        Buf b = heap Buf();
+        int32 n = fmt.byteLength();
+        int32 argN = 0;
+        int32 i = 0;
+        while (i < n) {
+            int32 c = fmt.byteAt(i) & 255;
+            if (c != 37) {
+                b.addByte(c);
+                i = i + 1;
+                continue;
+            }
+            i = i + 1;
+            if (i >= n) {
+                ev.err("format: dangling '%'", line);
+            }
+            int32 d = fmt.byteAt(i) & 255;
+            int32 prec = 0 - 1;
+            if (d == 46) {                   // %.Nf
+                i = i + 1;
+                prec = 0;
+                while (i < n && fmt.byteAt(i) >= 48
+                        && fmt.byteAt(i) <= 57) {
+                    prec = prec * 10 + (fmt.byteAt(i) - 48);
+                    i = i + 1;
+                }
+                if (i >= n) {
+                    ev.err("format: dangling precision", line);
+                }
+                d = fmt.byteAt(i) & 255;
+            }
+            i = i + 1;
+            if (d == 37) {
+                b.addByte(37);
+                continue;
+            }
+            int32 an = Filters.argAt(ev, args, argN, null);
+            if (an < 0) {
+                ev.err("format: not enough arguments", line);
+            }
+            argN = argN + 1;
+            JsonValue av #= ev.eval(an);
+            if (d == 115) {                  // %s
+                String t #= ev.text(av, line);
+                b.addStr(t);
+            } else if (d == 100 || d == 105) {  // %d %i
+                b.addStr("" + Eval.toI64(av));
+            } else if (d == 102) {           // %f / %.Nf
+                int32 p = 6;
+                if (prec >= 0) {
+                    p = prec;
+                }
+                Filters.fixed(b, Eval.toF64(av), p);
+            } else {
+                ev.err("format: unsupported directive '%"
+                    + ("" + d) + "' (byte value)", line);
+            }
+        }
+        return #Eval.str(b.take());
+    }
+
+    /** Fixed-point text with `p` fraction digits (dyadic-exact). */
+    static void fixed(Buf b, float64 v, int32 p) {
+        if (v < 0.0) {
+            b.addByte(45);
+            v = 0.0 - v;
+        }
+        float64 ip = Math.floor(v);
+        b.addStr("" + (int64) ip);
+        if (p == 0) {
+            return;
+        }
+        b.addByte(46);
+        float64 frac = v - ip;
+        int32 i = 0;
+        while (i < p) {
+            frac = frac * 10.0;
+            int32 dg = (int32) Math.floor(frac);
+            frac = frac - Math.floor(frac);
+            b.addByte(48 + dg);
+            i = i + 1;
+        }
+    }
+
+    static #JsonValue toIntF(JsonValue v, int64 dflt) {
+        if (v == null) {
+            return #Eval.num(dflt);
+        }
+        if (v.kind() == JsonValue.BOOLEAN) {
+            return #Eval.num(Eval.toI64(v));
+        }
+        if (v.kind() == JsonValue.NUMBER) {
+            if (v.isFloat()) {
+                return #Eval.num((int64) v.asFloat64());
+            }
+            return #Eval.num(v.asInt64());
+        }
+        if (v.kind() == JsonValue.STRING) {
+            String s #= v.asString();
+            boolean numeric = s.byteLength() > 0;
+            boolean seenDot = false;
+            int32 i = 0;
+            while (i < s.byteLength()) {
+                int32 c = s.byteAt(i);
+                boolean ok = (c >= 48 && c <= 57)
+                    || (i == 0 && (c == 45 || c == 43));
+                if (c == 46 && seenDot == false) {
+                    ok = true;
+                    seenDot = true;
+                }
+                if (ok == false) {
+                    numeric = false;
+                }
+                i = i + 1;
+            }
+            if (numeric == false) {
+                return #Eval.num(dflt);
+            }
+            boolean neg = s.byteAt(0) == 45;
+            if (seenDot) {
+                float64 f = Eval.parseFloat(s);
+                if (neg) { f = 0.0 - f; }
+                return #Eval.num((int64) f);
+            }
+            int64 x = Eval.parseInt(s);
+            if (neg) { x = 0 - x; }
+            return #Eval.num(x);
+        }
+        return #Eval.num(dflt);
+    }
+
+    static #JsonValue toFloatF(JsonValue v, float64 dflt) {
+        if (v == null) {
+            return #Eval.flt(dflt);
+        }
+        if (Eval.isNumberish(v)) {
+            return #Eval.flt(Eval.toF64(v));
+        }
+        if (v.kind() == JsonValue.STRING) {
+            String s #= v.asString();
+            boolean numeric = s.byteLength() > 0;
+            boolean seenDot = false;
+            int32 i = 0;
+            while (i < s.byteLength()) {
+                int32 c = s.byteAt(i);
+                boolean ok = (c >= 48 && c <= 57)
+                    || (i == 0 && (c == 45 || c == 43));
+                if (c == 46 && seenDot == false) {
+                    ok = true;
+                    seenDot = true;
+                }
+                if (ok == false) {
+                    numeric = false;
+                }
+                i = i + 1;
+            }
+            if (numeric == false) {
+                return #Eval.flt(dflt);
+            }
+            boolean neg = s.byteAt(0) == 45;
+            float64 f = Eval.parseFloat(s);
+            if (neg) { f = 0.0 - f; }
+            return #Eval.flt(f);
+        }
+        return #Eval.flt(dflt);
+    }
+
+    /** HTML-safe json.dumps: standard escapes plus < > & ' as \\uXXXX,
+     *  non-ASCII \\u-escaped (ensure_ascii), Python separators. */
+    static void writeJson(Eval ev, Buf b, JsonValue v, boolean indent,
+            int32 level, int32 line) {
+        if (v == null) {
+            b.addStr("null");
+            return;
+        }
+        int32 k = v.kind();
+        if (k == JsonValue.NULL) {
+            b.addStr("null");
+            return;
+        }
+        if (k == JsonValue.BOOLEAN) {
+            if (v.asBoolean()) { b.addStr("true"); }
+            else { b.addStr("false"); }
+            return;
+        }
+        if (k == JsonValue.NUMBER) {
+            if (v.isFloat()) {
+                String f #= Eval.fmtFloat(v.asFloat64());
+                b.addStr(f);
+            } else {
+                b.addStr("" + v.asInt64());
+            }
+            return;
+        }
+        if (k == JsonValue.STRING) {
+            Filters.writeJsonString(b, v);
+            return;
+        }
+        if (k == JsonValue.ARRAY) {
+            JsonArray a = v.array();
+            b.addByte(91);
+            int32 i = 0;
+            while (i < a.count()) {
+                if (i > 0) {
+                    b.addByte(44);
+                    if (indent == false) {
+                        b.addByte(32);
+                    }
+                }
+                if (indent) {
+                    b.addByte(10);
+                    Filters.pad(b, level + 1);
+                }
+                Filters.writeJson(ev, b, a.get(i), indent, level + 1,
+                    line);
+                i = i + 1;
+            }
+            if (indent && a.count() > 0) {
+                b.addByte(10);
+                Filters.pad(b, level);
+            }
+            b.addByte(93);
+            return;
+        }
+        JsonObject o = v.object();
+        b.addByte(123);
+        int32 j = 0;
+        while (j < o.count()) {
+            if (j > 0) {
+                b.addByte(44);
+                if (indent == false) {
+                    b.addByte(32);
+                }
+            }
+            if (indent) {
+                b.addByte(10);
+                Filters.pad(b, level + 1);
+            }
+            String key #= Eval.keyOf(o, j);
+            JsonValue kv #= Eval.str(key);
+            Filters.writeJsonString(b, kv);
+            b.addByte(58);
+            b.addByte(32);
+            Filters.writeJson(ev, b, o.valueAt(j), indent, level + 1,
+                line);
+            j = j + 1;
+        }
+        if (indent && o.count() > 0) {
+            b.addByte(10);
+            Filters.pad(b, level);
+        }
+        b.addByte(125);
+    }
+
+    static void pad(Buf b, int32 level) {
+        int32 i = 0;
+        while (i < level * 2) {
+            b.addByte(32);
+            i = i + 1;
+        }
+    }
+
+    static void writeJsonString(Buf b, JsonValue v) {
+        b.addByte(34);
+        int8[] s = v.asBytes();
+        int32 n = v.asBytesLength();
+        int32 i = 0;
+        while (i < n) {
+            int32 c = ((int32) s[i]) & 255;
+            // addByte pairs, not string escapes — cajeta literals do
+            // not collapse a doubled backslash (the llama JSON-writer
+            // precedent).
+            if (c == 34) { b.addByte(92); b.addByte(34); i = i + 1; }
+            else if (c == 92) { b.addByte(92); b.addByte(92); i = i + 1; }
+            else if (c == 10) { b.addByte(92); b.addByte(110); i = i + 1; }
+            else if (c == 9) { b.addByte(92); b.addByte(116); i = i + 1; }
+            else if (c == 13) { b.addByte(92); b.addByte(114); i = i + 1; }
+            else if (c == 8) { b.addByte(92); b.addByte(98); i = i + 1; }
+            else if (c == 12) { b.addByte(92); b.addByte(102); i = i + 1; }
+            else if (c == 60 || c == 62 || c == 38 || c == 39
+                    || c < 32) {
+                Filters.uEscape(b, c);
+                i = i + 1;
+            } else if (c < 128) {
+                b.addByte(c);
+                i = i + 1;
+            } else {
+                // ensure_ascii: decode the UTF-8 sequence, \\u-escape.
+                int32 len = 2;
+                int32 cp = c & 31;
+                if (c >= 240) { len = 4; cp = c & 7; }
+                else if (c >= 224) { len = 3; cp = c & 15; }
+                int32 j = 1;
+                while (j < len && i + j < n) {
+                    cp = (cp * 64) + (((int32) s[i + j]) & 63);
+                    j = j + 1;
+                }
+                if (cp >= 65536) {
+                    int32 hi = 55296 + ((cp - 65536) / 1024);
+                    int32 lo = 56320 + ((cp - 65536) % 1024);
+                    Filters.uEscape(b, hi);
+                    Filters.uEscape(b, lo);
+                } else {
+                    Filters.uEscape(b, cp);
+                }
+                i = i + len;
+            }
+        }
+        b.addByte(34);
+    }
+
+    static void uEscape(Buf b, int32 cp) {
+        b.addByte(92);
+        b.addByte(117);                      // 'u'
+        int32 shift = 12;
+        while (shift >= 0) {
+            int32 d = (cp / Filters.pow16(shift)) % 16;
+            if (d < 10) {
+                b.addByte(48 + d);
+            } else {
+                b.addByte(97 + d - 10);
+            }
+            shift = shift - 4;
+        }
+    }
+
+    static int32 pow16(int32 shift) {
+        if (shift == 12) { return 4096; }
+        if (shift == 8) { return 256; }
+        if (shift == 4) { return 16; }
+        return 1;
+    }
+}

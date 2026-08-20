@@ -1,0 +1,8 @@
+{{ 'hello world-foo' | title }}|{{ 'hELLO wORLD' | capitalize }}|{{ 'UP down' | lower }}|{{ 'up' | upper }}
+{{ '  pad  ' | trim }}|{{ 'a b  c	d' | wordcount }}|{{ 'héllo' | length }}|{{ 'abc' | reverse }}
+{{ 'a\nb\nc' | indent(2) }}
+{{ 'a\nb' | indent(2, true) }}
+{{ '<b>a</b>  <i>b</i>' | striptags }}|{{ 'a<b>&"' | escape }}|{{ 'x<y' | safe }}|{{ 'q' | e }}
+{{ '%s has %d and %.2f' | format('x', 7, 2.5) }}|{{ 'aXbXc' | replace('X', '-') }}
+{{ 'abc' | first }}{{ 'abc' | last }}|{{ 'ab' | list }}|{{ 123 | string | length }}
+{{ 'one two' | title }}|{{ '' | capitalize }}|

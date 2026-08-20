@@ -1,0 +1,201 @@
+package dev.cajeta.jinja;
+
+import cajeta.lang.String;
+
+/**
+ * strftime over an injected epoch clock (spec 2.21): UTC only, which is
+ * what the oracle generator uses (`datetime.fromtimestamp(now, tz=utc)`)
+ * and what deterministic template rendering wants. Civil-date math is
+ * Howard Hinnant's days-from-epoch algorithm.
+ *
+ * Directives: %Y %y %m %d %e %H %I %M %S %p %a %A %b %B %j %w %% — the
+ * set shipped chat templates actually use, plus the common clock forms.
+ * Anything else fails LOUDLY naming the directive (spec 2.22).
+ */
+final class Strftime {
+
+    static #String monthShort(int32 m) {
+        if (m == 1) { return "Jan"; }
+        if (m == 2) { return "Feb"; }
+        if (m == 3) { return "Mar"; }
+        if (m == 4) { return "Apr"; }
+        if (m == 5) { return "May"; }
+        if (m == 6) { return "Jun"; }
+        if (m == 7) { return "Jul"; }
+        if (m == 8) { return "Aug"; }
+        if (m == 9) { return "Sep"; }
+        if (m == 10) { return "Oct"; }
+        if (m == 11) { return "Nov"; }
+        return "Dec";
+    }
+
+    static #String monthLong(int32 m) {
+        if (m == 1) { return "January"; }
+        if (m == 2) { return "February"; }
+        if (m == 3) { return "March"; }
+        if (m == 4) { return "April"; }
+        if (m == 5) { return "May"; }
+        if (m == 6) { return "June"; }
+        if (m == 7) { return "July"; }
+        if (m == 8) { return "August"; }
+        if (m == 9) { return "September"; }
+        if (m == 10) { return "October"; }
+        if (m == 11) { return "November"; }
+        return "December";
+    }
+
+    /** 0 = Sunday, matching %w. */
+    static #String dayShort(int32 w) {
+        if (w == 0) { return "Sun"; }
+        if (w == 1) { return "Mon"; }
+        if (w == 2) { return "Tue"; }
+        if (w == 3) { return "Wed"; }
+        if (w == 4) { return "Thu"; }
+        if (w == 5) { return "Fri"; }
+        return "Sat";
+    }
+
+    static #String dayLong(int32 w) {
+        if (w == 0) { return "Sunday"; }
+        if (w == 1) { return "Monday"; }
+        if (w == 2) { return "Tuesday"; }
+        if (w == 3) { return "Wednesday"; }
+        if (w == 4) { return "Thursday"; }
+        if (w == 5) { return "Friday"; }
+        return "Saturday";
+    }
+
+    static void pad2(Buf b, int32 v) {
+        if (v < 10) {
+            b.addByte(48);
+        }
+        b.addStr("" + v);
+    }
+
+    static void pad3(Buf b, int32 v) {
+        if (v < 100) {
+            b.addByte(48);
+        }
+        if (v < 10) {
+            b.addByte(48);
+        }
+        b.addStr("" + v);
+    }
+
+    static boolean isLeap(int32 y) {
+        if (y % 4 != 0) {
+            return false;
+        }
+        if (y % 100 != 0) {
+            return true;
+        }
+        return y % 400 == 0;
+    }
+
+    static #String format(String fmt, int64 epochSeconds) {
+        // Civil date from days (Hinnant): shift epoch to 0000-03-01 eras.
+        int64 days = epochSeconds / 86400;
+        int64 secs = epochSeconds % 86400;
+        if (secs < 0) {
+            secs = secs + 86400;
+            days = days - 1;
+        }
+        int32 hour = (int32) (secs / 3600);
+        int32 minute = (int32) ((secs % 3600) / 60);
+        int32 second = (int32) (secs % 60);
+
+        int64 z = days + 719468;
+        int64 era = z / 146097;
+        if (z < 0) {
+            era = (z - 146096) / 146097;
+        }
+        int64 doe = z - era * 146097;                       // [0, 146096]
+        int64 yoe = (doe - doe / 1460 + doe / 36524
+            - doe / 146096) / 365;                          // [0, 399]
+        int64 yy = yoe + era * 400;
+        int64 doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+        int64 mp = (5 * doy + 2) / 153;                     // [0, 11]
+        int32 day = (int32) (doy - (153 * mp + 2) / 5 + 1); // [1, 31]
+        int32 month = (int32) mp + 3;
+        if (month > 12) {
+            month = month - 12;
+            yy = yy + 1;
+        }
+        int32 year = (int32) yy;
+        // Weekday: epoch day 0 (1970-01-01) was a Thursday; %w is
+        // 0=Sunday.
+        int32 wday = (int32) ((days + 4) % 7);
+        if (wday < 0) {
+            wday = wday + 7;
+        }
+        // Day of year, 1-based.
+        int32 yday = day;
+        int32 mm = 1;
+        while (mm < month) {
+            int32 len = 31;
+            if (mm == 4 || mm == 6 || mm == 9 || mm == 11) {
+                len = 30;
+            } else if (mm == 2) {
+                len = 28;
+                if (Strftime.isLeap(year)) {
+                    len = 29;
+                }
+            }
+            yday = yday + len;
+            mm = mm + 1;
+        }
+
+        Buf b = heap Buf();
+        int32 n = fmt.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            int32 c = fmt.byteAt(i);
+            if (c != 37) {                   // not '%'
+                b.addByte(c);
+                i = i + 1;
+                continue;
+            }
+            if (i + 1 >= n) {
+                throw heap JinjaException(
+                    "strftime_now: dangling '%' at end of format", 0, 0);
+            }
+            int32 d = fmt.byteAt(i + 1);
+            i = i + 2;
+            if (d == 37) { b.addByte(37); }                       // %%
+            else if (d == 89) { b.addStr("" + year); }            // %Y
+            else if (d == 121) { Strftime.pad2(b, year % 100); }  // %y
+            else if (d == 109) { Strftime.pad2(b, month); }       // %m
+            else if (d == 100) { Strftime.pad2(b, day); }         // %d
+            else if (d == 101) {                                  // %e
+                if (day < 10) { b.addByte(32); }
+                b.addStr("" + day);
+            }
+            else if (d == 72) { Strftime.pad2(b, hour); }         // %H
+            else if (d == 73) {                                   // %I
+                int32 h12 = hour % 12;
+                if (h12 == 0) { h12 = 12; }
+                Strftime.pad2(b, h12);
+            }
+            else if (d == 77) { Strftime.pad2(b, minute); }       // %M
+            else if (d == 83) { Strftime.pad2(b, second); }       // %S
+            else if (d == 112) {                                  // %p
+                if (hour < 12) { b.addStr("AM"); } else { b.addStr("PM"); }
+            }
+            else if (d == 97) { b.addStr(Strftime.dayShort(wday)); }   // %a
+            else if (d == 65) { b.addStr(Strftime.dayLong(wday)); }    // %A
+            else if (d == 98) { b.addStr(Strftime.monthShort(month)); } // %b
+            else if (d == 66) { b.addStr(Strftime.monthLong(month)); }  // %B
+            else if (d == 106) { Strftime.pad3(b, yday); }        // %j
+            else if (d == 119) { b.addStr("" + wday); }           // %w
+            else {
+                int8[] one = heap int8[1];
+                one[0] = (int8) d;
+                String dir #= heap String(#one, 1);
+                throw heap JinjaException(
+                    "strftime_now: unsupported directive '%" + dir
+                    + "'", 0, 0);
+            }
+        }
+        return #b.take();
+    }
+}

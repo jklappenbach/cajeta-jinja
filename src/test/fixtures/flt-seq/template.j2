@@ -1,0 +1,8 @@
+{{ words | sort }}|{{ words | sort(reverse=true) }}
+{{ people | sort(attribute='age') | map(attribute='name') | list }}
+{{ ['a', 'A', 'b', 'a'] | unique | list }}|{{ [1, 2, 3] | reverse | list }}
+{{ [1, 2, 3, 4, 5] | batch(2) | list }}|{{ [1, 2, 3, 4, 5] | batch(2, 0) | list }}
+{{ [1, 2] | first }}|{{ [1, 2] | last }}|{{ [1, 2, 3] | length }}|{{ d | list }}|{{ d | length }}
+{% for k, v in d | dictsort %}{{ k }}={{ v }};{% endfor %}|{% for k, v in d | items %}{{ k }}:{{ v }},{% endfor %}
+{{ ['x', 'y'] | join }}|{{ [1, 2] | join('-') }}|{{ people | join(',', attribute='age') }}
+{{ words | max }}|{{ words | min }}|{{ people | sum(attribute='age') }}

@@ -44,6 +44,7 @@ final class Eval {
     Node nd;
     JsonValue ctx;           // root context (borrow for the render call)
     boolean strict;
+    int64 nowEpoch;          // injected clock; 0 = unset (spec 2.21)
 
     Buf out;
     String lastUndef;        // last name that resolved to undefined
@@ -70,6 +71,7 @@ final class Eval {
         this.nd = null;
         this.ctx = null;
         this.strict = false;
+        this.nowEpoch = 0;
         this.out = heap Buf();
         this.lastUndef = "";
         this.names = heap String[16];
@@ -162,8 +164,84 @@ final class Eval {
                 return #Eval.copy(got);
             }
         }
+        if (Eval.isBuiltinCallable(name)) {
+            return #this.makeHandle("__jinja_callable__", name);
+        }
         this.lastUndef #= "" + name;
         return null;
+    }
+
+    static boolean isBuiltinCallable(String name) {
+        return name.equals("range") || name.equals("dict")
+            || name.equals("namespace") || name.equals("cycler")
+            || name.equals("joiner") || name.equals("lipsum")
+            || name.equals("strftime_now")
+            || name.equals("raise_exception");
+    }
+
+    /** {"<marker>": name} — a copyable handle value. */
+    #JsonValue makeHandle(String marker, String name) {
+        JsonObject h = heap JsonObject();
+        Eval.putKey(h, marker, Eval.str(name));
+        JsonValue v = heap JsonValue();
+        v.setObject(#h);
+        return #v;
+    }
+
+    /** {"<marker>": id} — a registry-backed handle. */
+    #JsonValue makeIdHandle(String marker, int32 id) {
+        JsonObject h = heap JsonObject();
+        Eval.putKey(h, marker, Eval.num((int64) id));
+        JsonValue v = heap JsonValue();
+        v.setObject(#h);
+        return #v;
+    }
+
+    /** Registry id behind a handle, or -1. */
+    int32 handleId(JsonValue v, String marker) {
+        if (v == null || v.kind() != JsonValue.OBJECT) {
+            return 0 - 1;
+        }
+        JsonValue idv = v.object().get(marker);
+        if (idv == null || idv.kind() != JsonValue.NUMBER) {
+            return 0 - 1;
+        }
+        return (int32) idv.asInt64();
+    }
+
+    /** Store an entry, return its id (namespaces, cyclers, joiners). */
+    int32 registryAdd(#JsonValue entry) {
+        if (this.nsN >= (int32) this.nsStore.count()) {
+            JsonValue[] grown = heap JsonValue[this.nsN * 2];
+            int32 g = 0;
+            while (g < this.nsN) {
+                grown[g] = this.nsStore[g];
+                g = g + 1;
+            }
+            this.nsStore #= grown;
+        }
+        this.nsStore[this.nsN] #= entry;
+        this.nsN = this.nsN + 1;
+        return this.nsN - 1;
+    }
+
+    /** Replace-semantics write into a registry entry (JsonObject.put
+     *  APPENDS by contract, so rebuild without the old binding). */
+    void registryWrite(int32 id, String attr, #JsonValue v) {
+        JsonObject old = this.nsStore[id].object();
+        JsonObject fresh = heap JsonObject();
+        int32 j = 0;
+        while (j < old.count()) {
+            String key #= Eval.keyOf(old, j);
+            if (key.equals(attr) == false) {
+                Eval.putKey(fresh, key, Eval.copy(old.valueAt(j)));
+            }
+            j = j + 1;
+        }
+        Eval.putKey(fresh, attr, #v);
+        JsonValue nv = heap JsonValue();
+        nv.setObject(#fresh);
+        this.nsStore[id] #= nv;
     }
 
     // ── rendering ──────────────────────────────────────────────────────
@@ -277,20 +355,7 @@ final class Eval {
      *  the entry is rebuilt without the old binding. Entries are a
      *  handful of attrs; O(n) per write is nothing. */
     void nsWrite(int32 id, String attr, #JsonValue v) {
-        JsonObject old = this.nsStore[id].object();
-        JsonObject fresh = heap JsonObject();
-        int32 j = 0;
-        while (j < old.count()) {
-            String key #= Eval.keyOf(old, j);
-            if (key.equals(attr) == false) {
-                Eval.putKey(fresh, key, Eval.copy(old.valueAt(j)));
-            }
-            j = j + 1;
-        }
-        Eval.putKey(fresh, attr, #v);
-        JsonValue nv = heap JsonValue();
-        nv.setObject(#fresh);
-        this.nsStore[id] #= nv;
+        this.registryWrite(id, attr, #v);
     }
 
     void execWith(int32 i) {
@@ -502,14 +567,7 @@ final class Eval {
 
     /** Namespace-handle id, or -1 when the value is not one. */
     int32 nsIdOf(JsonValue v) {
-        if (v == null || v.kind() != JsonValue.OBJECT) {
-            return 0 - 1;
-        }
-        JsonValue idv = v.object().get("__jinja_ns__");
-        if (idv == null || idv.kind() != JsonValue.NUMBER) {
-            return 0 - 1;
-        }
-        return (int32) idv.asInt64();
+        return this.handleId(v, "__jinja_ns__");
     }
 
     // ── errors ─────────────────────────────────────────────────────────
@@ -1105,8 +1163,9 @@ final class Eval {
             return #this.evalTest(i);
         }
         if (k == Node.E_FILTER) {
-            this.err("unsupported filter '" + this.nd.strOf(i)
-                + "': filters land with Unit 5", line);
+            JsonValue fv #= this.eval(this.nd.a(i));
+            return #Filters.apply(this, this.nd.strOf(i), fv,
+                this.nd.b(i), line);
         }
         if (k == Node.E_LIST) {
             JsonArray arr = heap JsonArray();
@@ -1440,6 +1499,13 @@ final class Eval {
     }
 
     #JsonValue member(JsonValue o, String name) {
+        int32 cyId = this.handleId(o, "__jinja_cycler__");
+        if (cyId >= 0 && name.equals("current")) {
+            JsonObject e = this.nsStore[cyId].object();
+            JsonArray items = e.get("items").array();
+            int32 pos = (int32) e.get("pos").asInt64();
+            return #Eval.copy(items.get(pos));
+        }
         int32 nsId = this.nsIdOf(o);
         if (nsId >= 0) {
             JsonValue got = this.nsStore[nsId].object().get(name);
@@ -1593,53 +1659,218 @@ final class Eval {
      *  and never count as a read, even under strict. */
     #JsonValue evalTest(int32 i) {
         String name = this.nd.strOf(i);
-        int32 line = this.nd.line(i);
         JsonValue v #= this.eval(this.nd.a(i));
-        boolean r = false;
-        if (name.equals("defined")) {
-            r = v != null;
-        } else if (name.equals("undefined")) {
-            r = v == null;
-        } else if (name.equals("none")) {
-            r = v != null && v.kind() == JsonValue.NULL;
-        } else if (name.equals("string")) {
-            r = v != null && v.kind() == JsonValue.STRING;
-        } else if (name.equals("number")) {
-            r = v != null && (v.kind() == JsonValue.NUMBER
-                || v.kind() == JsonValue.BOOLEAN);
-        } else if (name.equals("boolean")) {
-            r = v != null && v.kind() == JsonValue.BOOLEAN;
-        } else if (name.equals("mapping")) {
-            r = v != null && v.kind() == JsonValue.OBJECT;
-        } else if (name.equals("sequence")) {
-            r = v != null && (v.kind() == JsonValue.ARRAY
-                || v.kind() == JsonValue.STRING
-                || v.kind() == JsonValue.OBJECT);
-        } else if (name.equals("iterable")) {
-            r = v != null && (v.kind() == JsonValue.ARRAY
-                || v.kind() == JsonValue.STRING
-                || v.kind() == JsonValue.OBJECT);
-        } else if (name.equals("true")) {
-            r = v != null && v.kind() == JsonValue.BOOLEAN
-                && v.asBoolean();
-        } else if (name.equals("false")) {
-            r = v != null && v.kind() == JsonValue.BOOLEAN
-                && v.asBoolean() == false;
-        } else if (name.equals("odd")) {
-            r = v != null && Eval.isNumberish(v)
-                && Eval.isFloaty(v) == false
-                && (Eval.toI64(v) % 2 != 0);
-        } else if (name.equals("even")) {
-            r = v != null && Eval.isNumberish(v)
-                && Eval.isFloaty(v) == false
-                && (Eval.toI64(v) % 2 == 0);
-        } else {
-            this.err("unsupported test 'is " + name + "'", line);
-        }
+        boolean r = this.applyTest(name, v, this.nd.b(i),
+            this.nd.line(i));
         if (this.nd.d(i) == 1) {
             r = r == false;
         }
         return #Eval.bool(r);
+    }
+
+    /** The spec-2.18 test set, by name — shared with select/reject/
+     *  selectattr/rejectattr. `args` is the argument node chain (the
+     *  no-paren single-arg form lands here too). Unknown names fail
+     *  LOUDLY (spec 2.22). Note `true is integer` is False — Python
+     *  bools are excluded from integer/float, matching the oracle. */
+    boolean applyTest(String name, JsonValue v, int32 args,
+            int32 line) {
+        if (name.equals("defined")) {
+            return v != null;
+        }
+        if (name.equals("undefined")) {
+            return v == null;
+        }
+        if (name.equals("none")) {
+            return v != null && v.kind() == JsonValue.NULL;
+        }
+        if (name.equals("boolean")) {
+            return v != null && v.kind() == JsonValue.BOOLEAN;
+        }
+        if (name.equals("true")) {
+            return v != null && v.kind() == JsonValue.BOOLEAN
+                && v.asBoolean();
+        }
+        if (name.equals("false")) {
+            return v != null && v.kind() == JsonValue.BOOLEAN
+                && v.asBoolean() == false;
+        }
+        if (name.equals("integer")) {
+            return v != null && v.kind() == JsonValue.NUMBER
+                && v.isFloat() == false;
+        }
+        if (name.equals("float")) {
+            return v != null && v.kind() == JsonValue.NUMBER
+                && v.isFloat();
+        }
+        if (name.equals("number")) {
+            return v != null && (v.kind() == JsonValue.NUMBER
+                || v.kind() == JsonValue.BOOLEAN);
+        }
+        if (name.equals("string")) {
+            return v != null && v.kind() == JsonValue.STRING;
+        }
+        if (name.equals("mapping")) {
+            return v != null && v.kind() == JsonValue.OBJECT;
+        }
+        if (name.equals("sequence") || name.equals("iterable")) {
+            return v != null && (v.kind() == JsonValue.ARRAY
+                || v.kind() == JsonValue.STRING
+                || v.kind() == JsonValue.OBJECT);
+        }
+        if (name.equals("callable")) {
+            return this.handleId(v, "__jinja_joiner__") >= 0
+                || (v != null && v.kind() == JsonValue.OBJECT
+                    && v.object().containsKey("__jinja_callable__"));
+        }
+        if (name.equals("odd") || name.equals("even")) {
+            if (v == null || v.kind() != JsonValue.NUMBER
+                    || v.isFloat()) {
+                this.err("'is " + name + "' needs an integer", line);
+            }
+            boolean odd = v.asInt64() % 2 != 0;
+            if (name.equals("odd")) {
+                return odd;
+            }
+            return odd == false;
+        }
+        if (name.equals("divisibleby")) {
+            if (args < 0) {
+                this.err("'is divisibleby' needs a number", line);
+            }
+            JsonValue d #= this.eval(args);
+            if (v == null || Eval.isNumberish(v) == false
+                    || Eval.isNumberish(d) == false) {
+                this.err("'is divisibleby' needs numbers", line);
+            }
+            int64 dv = Eval.toI64(d);
+            if (dv == 0) {
+                this.err("'is divisibleby' by zero", line);
+            }
+            return Eval.toI64(v) % dv == 0;
+        }
+        if (name.equals("upper") || name.equals("lower")) {
+            if (v == null || v.kind() != JsonValue.STRING) {
+                return false;
+            }
+            boolean anyLetter = false;
+            boolean wantUpper = name.equals("upper");
+            int8[] sb = v.asBytes();
+            int32 n = v.asBytesLength();
+            int32 i2 = 0;
+            while (i2 < n) {
+                int32 c = ((int32) sb[i2]) & 255;
+                boolean isUp = c >= 65 && c <= 90;
+                boolean isLo = c >= 97 && c <= 122;
+                if (isUp || isLo) {
+                    anyLetter = true;
+                    if (wantUpper && isLo) {
+                        return false;
+                    }
+                    if (wantUpper == false && isUp) {
+                        return false;
+                    }
+                }
+                i2 = i2 + 1;
+            }
+            return anyLetter;
+        }
+        if (name.equals("sameas")) {
+            if (args < 0) {
+                this.err("'is sameas' needs an argument", line);
+            }
+            JsonValue o #= this.eval(args);
+            if (v == null || o == null) {
+                return v == null && o == null;
+            }
+            int32 ka = v.kind();
+            if (ka != o.kind()) {
+                return false;
+            }
+            if (ka == JsonValue.NULL) {
+                return true;
+            }
+            if (ka == JsonValue.BOOLEAN) {
+                return v.asBoolean() == o.asBoolean();
+            }
+            if (ka == JsonValue.NUMBER) {
+                // CPython interns small ints; approximate with value
+                // equality (the oracle agrees for the corpus).
+                return this.eq(v, o, line);
+            }
+            if (ka == JsonValue.OBJECT) {
+                int32 va = this.nsIdOf(v);
+                if (va >= 0) {
+                    return va == this.nsIdOf(o);
+                }
+            }
+            return false;
+        }
+        if (name.equals("in")) {
+            if (args < 0) {
+                this.err("'is in' needs a sequence", line);
+            }
+            JsonValue seq #= this.eval(args);
+            return this.contains(seq, v, line);
+        }
+        if (name.equals("eq") || name.equals("equalto")) {
+            JsonValue o #= this.eval(args);
+            return this.eq(v, o, line);
+        }
+        if (name.equals("ne")) {
+            JsonValue o #= this.eval(args);
+            return this.eq(v, o, line) == false;
+        }
+        if (name.equals("lt") || name.equals("gt") || name.equals("le")
+                || name.equals("ge")) {
+            if (args < 0) {
+                this.err("'is " + name + "' needs an argument", line);
+            }
+            JsonValue o #= this.eval(args);
+            int32 c = this.ordCmp(v, o, line);
+            if (name.equals("lt")) { return c < 0; }
+            if (name.equals("gt")) { return c > 0; }
+            if (name.equals("le")) { return c <= 0; }
+            return c >= 0;
+        }
+        this.err("unsupported test 'is " + name + "'", line);
+        return false;                        // unreachable
+    }
+
+    /** Deterministic lorem ipsum. Jinja's is RANDOM, so no template
+     *  can depend on its bytes — determinism here is a feature, and
+     *  the divergence is documented in the plan. */
+    #JsonValue lipsum(int32 args, int32 line) {
+        int64 n = 5;
+        int32 a0 = args;
+        if (a0 >= 0 && this.nd.k(a0) != Node.E_KWARG) {
+            JsonValue nv #= this.eval(a0);
+            n = Eval.toI64(nv);
+            a0 = this.nd.nx(a0);
+        }
+        boolean html = true;
+        if (a0 >= 0) {
+            JsonValue hv #= this.eval(a0);
+            html = this.truthy(hv, line);
+        }
+        Buf b = heap Buf();
+        int64 i = 0;
+        while (i < n) {
+            if (i > 0) {
+                b.addStr("\n\n");
+            }
+            if (html) {
+                b.addStr("<p>");
+            }
+            b.addStr("Lorem ipsum dolor sit amet, consectetur "
+                + "adipiscing elit, sed do eiusmod tempor incididunt "
+                + "ut labore et dolore magna aliqua.");
+            if (html) {
+                b.addStr("</p>");
+            }
+            i = i + 1;
+        }
+        return #Eval.str(b.take());
     }
 
     #JsonValue evalCall(int32 i) {
@@ -1710,7 +1941,85 @@ final class Eval {
                 v.setObject(#o);
                 return #v;
             }
-            this.err("'" + fn + "' is undefined or not callable", line);
+            if (fn.equals("cycler")) {
+                JsonArray items = heap JsonArray();
+                int32 ca = args;
+                while (ca >= 0) {
+                    JsonValue cav #= this.eval(ca);
+                    if (cav == null) {
+                        cav = heap JsonValue();
+                        cav.setNull();
+                    }
+                    items.add(#cav);
+                    ca = this.nd.nx(ca);
+                }
+                if (items.count() == 0) {
+                    this.err("cycler() needs at least one argument",
+                        line);
+                }
+                JsonObject entry = heap JsonObject();
+                JsonValue iv = heap JsonValue();
+                iv.setArray(#items);
+                Eval.putKey(entry, "items", #iv);
+                Eval.putKey(entry, "pos", Eval.num((int64) 0));
+                JsonValue ev2 = heap JsonValue();
+                ev2.setObject(#entry);
+                int32 id = this.registryAdd(#ev2);
+                return #this.makeIdHandle("__jinja_cycler__", id);
+            }
+            if (fn.equals("joiner")) {
+                String sep = ", ";
+                if (args >= 0) {
+                    String s2 #= this.argText(args, line);
+                    sep = "" + s2;
+                }
+                JsonObject entry = heap JsonObject();
+                Eval.putKey(entry, "sep", Eval.str(sep));
+                Eval.putKey(entry, "used", Eval.bool(false));
+                JsonValue ev3 = heap JsonValue();
+                ev3.setObject(#entry);
+                int32 id2 = this.registryAdd(#ev3);
+                return #this.makeIdHandle("__jinja_joiner__", id2);
+            }
+            if (fn.equals("raise_exception")) {
+                String msg = "";
+                if (args >= 0) {
+                    String m2 #= this.argText(args, line);
+                    msg = "" + m2;
+                }
+                throw heap JinjaException(msg + " (line " + line + ")",
+                    line, 0);
+            }
+            if (fn.equals("strftime_now")) {
+                if (this.nowEpoch == 0) {
+                    this.err("strftime_now: no clock was injected "
+                        + "(Environment.nowEpochSeconds)", line);
+                }
+                if (args < 0) {
+                    this.err("strftime_now needs a format string", line);
+                }
+                String f #= this.argText(args, line);
+                return #Eval.str(Strftime.format(f, this.nowEpoch));
+            }
+            if (fn.equals("lipsum")) {
+                return #this.lipsum(args, line);
+            }
+        }
+        if (ck != Node.E_ATTR) {
+            // General callee: a VALUE that is itself callable — a
+            // joiner, or a builtin bound to a variable.
+            JsonValue cv #= this.eval(callee);
+            int32 jid = this.handleId(cv, "__jinja_joiner__");
+            if (jid >= 0) {
+                JsonObject e = this.nsStore[jid].object();
+                boolean used = e.get("used").asBoolean();
+                if (used == false) {
+                    this.registryWrite(jid, "used", Eval.bool(true));
+                    return #Eval.str("");
+                }
+                return #Eval.copy(e.get("sep"));
+            }
+            this.err("value is not callable", line);
         }
         if (ck == Node.E_ATTR) {
             JsonValue obj #= this.eval(this.nd.a(callee));
@@ -1766,6 +2075,28 @@ final class Eval {
      *  the string/dict methods chat templates actually use. */
     #JsonValue callMethod(JsonValue obj, String m, int32 args,
             int32 line) {
+        int32 cyId = this.handleId(obj, "__jinja_cycler__");
+        if (cyId >= 0) {
+            JsonObject e = this.nsStore[cyId].object();
+            JsonArray items = e.get("items").array();
+            int32 pos = (int32) e.get("pos").asInt64();
+            if (m.equals("next")) {
+                JsonValue v #= Eval.copy(items.get(pos));
+                int32 nxt = pos + 1;
+                if (nxt >= items.count()) {
+                    nxt = 0;
+                }
+                this.registryWrite(cyId, "pos", Eval.num((int64) nxt));
+                return #= v;
+            }
+            if (m.equals("reset")) {
+                this.registryWrite(cyId, "pos", Eval.num((int64) 0));
+                JsonValue nv = heap JsonValue();
+                nv.setNull();
+                return #nv;
+            }
+            this.err("cycler has no method '." + m + "()'", line);
+        }
         if (m.equals("cycle") && obj.kind() == JsonValue.OBJECT
                 && obj.object().containsKey("__jinja_loop__")) {
             JsonValue iv = obj.object().get("index0");
