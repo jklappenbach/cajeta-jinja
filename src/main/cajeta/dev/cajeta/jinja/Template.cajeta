@@ -27,13 +27,202 @@ public final class Template {
 
     public Template(String source, boolean trimBlocks, boolean lstripBlocks,
                     boolean autoescape, boolean strictUndefined,
-                    int64 nowEpochSeconds) {
+                    int64 nowEpochSeconds, JinjaLoader loader) {
         this.autoescapeFlag = autoescape;
         this.strictUndefinedFlag = strictUndefined;
         this.nowEpochSecondsVal = nowEpochSeconds;
         Lexer lx = heap Lexer(source, trimBlocks, lstripBlocks);
         Tok toks = lx.tokenize();
         this.nd #= Parser.parse(toks);
+        // Loader-backed resolution (spec 2.12) happens HERE, at
+        // compile: extends chains resolve (super() levels linked),
+        // includes inline to a fixed point, and the loader is a
+        // BORROW for the duration of this constructor — a compiled
+        // Template renders with no loader in reach.
+        this.nd.root = this.resolveExtends(this.nd.root, loader,
+            trimBlocks, lstripBlocks, 0);
+        this.resolveIncludes(loader, trimBlocks, lstripBlocks);
+    }
+
+    /** The literal template name of an extends/include arg. */
+    #String literalName(int32 expr, String what) {
+        if (expr < 0 || this.nd.k(expr) != Node.E_STR) {
+            throw heap JinjaException("'" + what
+                + "' needs a string-literal template name (compile-"
+                + "time resolution)", 0, 0);
+        }
+        return "" + this.nd.strOf(expr);
+    }
+
+    #String loadVia(JinjaLoader loader, String name, String what) {
+        if (loader == null) {
+            throw heap JinjaException("'" + what + " \"" + name
+                + "\"' needs a loader (Environment.loader)", 0, 0);
+        }
+        return #loader.load(name);
+    }
+
+    int32 lexParse(String source, boolean trimBlocks,
+            boolean lstripBlocks) {
+        Lexer lx = heap Lexer(source, trimBlocks, lstripBlocks);
+        Tok toks = lx.tokenize();
+        return Parser.parseChainInto(this.nd, toks);
+    }
+
+    /** Is this chain node ignorable when looking for {% extends %}? */
+    boolean isWsText(int32 i) {
+        if (this.nd.k(i) != Node.N_TEXT) {
+            return false;
+        }
+        String t = this.nd.strOf(i);
+        int32 z = 0;
+        while (z < t.byteLength()) {
+            int32 c = t.byteAt(z);
+            if (c != 32 && c != 9 && c != 10 && c != 13) {
+                return false;
+            }
+            z = z + 1;
+        }
+        return true;
+    }
+
+    /**
+     * If `head` starts (modulo whitespace text) with {% extends %},
+     * resolve the parent recursively, graft this chain's top-level
+     * blocks onto it (linking super() levels), and return an
+     * N_EXTENDS root: a = the child's non-block statements (run with
+     * output DISCARDED — sets execute, text does not render),
+     * b = the resolved parent chain.
+     */
+    int32 resolveExtends(int32 head, JinjaLoader loader,
+            boolean trimBlocks, boolean lstripBlocks, int32 depth) {
+        if (depth > 16) {
+            throw heap JinjaException(
+                "extends chain deeper than 16 (cycle?)", 0, 0);
+        }
+        int32 ext = 0 - 1;
+        int32 scan = head;
+        while (scan >= 0) {
+            if (this.nd.k(scan) == Node.N_EXTENDS) {
+                ext = scan;
+                scan = 0 - 1;
+            } else if (this.isWsText(scan)) {
+                scan = this.nd.nx(scan);
+            } else {
+                scan = 0 - 1;
+            }
+        }
+        if (ext < 0) {
+            return head;
+        }
+        String name #= this.literalName(this.nd.a(ext), "extends");
+        String parentSrc #= this.loadVia(loader, name, "extends");
+        int32 parentHead = this.lexParse(parentSrc, trimBlocks,
+            lstripBlocks);
+        parentHead = this.resolveExtends(parentHead, loader,
+            trimBlocks, lstripBlocks, depth + 1);
+        // Split the child chain: unlink blocks AND the extends node.
+        int32 restHead = 0 - 1;
+        int32 restTail = 0 - 1;
+        int32 c = head;
+        while (c >= 0) {
+            int32 nxt = this.nd.nx(c);
+            if (this.nd.k(c) == Node.N_BLOCK) {
+                this.graftBlock(parentHead, this.nd.strOf(c),
+                    this.nd.b(c));
+            } else if (c != ext) {
+                this.nd.setNx(c, 0 - 1);
+                if (restTail < 0) {
+                    restHead = c;
+                } else {
+                    this.nd.setNx(restTail, c);
+                }
+                restTail = c;
+            }
+            c = nxt;
+        }
+        this.nd.setA(ext, restHead);
+        this.nd.setB(ext, parentHead);
+        this.nd.setNx(ext, 0 - 1);   // ext IS the root now — the old
+                                     // chain tail must not re-render
+        return ext;
+    }
+
+    /** Every N_BLOCK named `name` in the resolved tree gets the child
+     *  body, its old body demoted one super() level. */
+    void graftBlock(int32 chain, String name, int32 childBody) {
+        int32 i = chain;
+        while (i >= 0) {
+            int32 k = this.nd.k(i);
+            if (k == Node.N_BLOCK) {
+                if (this.nd.strOf(i) != null
+                        && this.nd.strOf(i).equals(name)) {
+                    int32 sup = this.nd.add(Node.N_BLOCK,
+                        this.nd.line(i));
+                    String nm = "" + name;
+                    this.nd.setStr(sup, #nm);
+                    this.nd.setB(sup, this.nd.b(i));
+                    this.nd.setC(sup, this.nd.c(i));
+                    this.nd.setB(i, childBody);
+                    this.nd.setC(i, sup);
+                } else {
+                    this.graftBlock(this.nd.b(i), name, childBody);
+                }
+            } else if (k == Node.N_IF) {
+                this.graftBlock(this.nd.b(i), name, childBody);
+                if (this.nd.c(i) >= 0) {
+                    this.graftBlock(this.nd.c(i), name, childBody);
+                }
+            } else if (k == Node.N_FOR || k == Node.N_WITH
+                    || k == Node.N_SET || k == Node.N_MACRO
+                    || k == Node.N_FILTBLK || k == Node.N_CALLBLK) {
+                if (this.nd.b(i) >= 0) {
+                    this.graftBlock(this.nd.b(i), name, childBody);
+                }
+                if (k == Node.N_FOR && this.nd.c(i) >= 0) {
+                    this.graftBlock(this.nd.c(i), name, childBody);
+                }
+            } else if (k == Node.N_EXTENDS) {
+                this.graftBlock(this.nd.b(i), name, childBody);
+            } else if (k == Node.N_INCLUDE) {
+                if (this.nd.b(i) >= 0) {
+                    this.graftBlock(this.nd.b(i), name, childBody);
+                }
+            }
+            i = this.nd.nx(i);
+        }
+    }
+
+    /** Inline every {% include %} to a fixed point (nested includes
+     *  keep appearing as the table grows; the guard breaks cycles). */
+    void resolveIncludes(JinjaLoader loader, boolean trimBlocks,
+            boolean lstripBlocks) {
+        int32 resolved = 0;
+        boolean again = true;
+        while (again) {
+            again = false;
+            int32 i = 0;
+            while (i < this.nd.n) {
+                if (this.nd.k(i) == Node.N_INCLUDE
+                        && this.nd.d(i) == 0) {
+                    if (resolved > 64) {
+                        throw heap JinjaException(
+                            "more than 64 includes (cycle?)", 0, 0);
+                    }
+                    String name #= this.literalName(this.nd.a(i),
+                        "include");
+                    String src #= this.loadVia(loader, name,
+                        "include");
+                    int32 chain = this.lexParse(src, trimBlocks,
+                        lstripBlocks);
+                    this.nd.setB(i, chain);
+                    this.nd.setD(i, 1);
+                    resolved = resolved + 1;
+                    again = true;
+                }
+                i = i + 1;
+            }
+        }
     }
 
     /**

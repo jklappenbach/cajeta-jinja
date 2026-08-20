@@ -1,0 +1,53 @@
+package dev.cajeta.jinja;
+
+import cajeta.lang.String;
+
+/**
+ * In-memory loader (plan 8.2.1): `put` sources under names, `load`
+ * fails loudly on a miss naming template and loader.
+ */
+public final class MapLoader implements JinjaLoader {
+    String[] names;
+    String[] sources;
+    int32 n;
+
+    public MapLoader() {
+        this.names = heap String[8];
+        this.sources = heap String[8];
+        this.n = 0;
+    }
+
+    public MapLoader put(String name, String source) {
+        if (this.n >= (int32) this.names.count()) {
+            String[] nn = heap String[this.n * 2];
+            String[] ns = heap String[this.n * 2];
+            int32 i = 0;
+            while (i < this.n) {
+                nn[i] = this.names[i];
+                ns[i] = this.sources[i];
+                i = i + 1;
+            }
+            this.names #= nn;
+            this.sources #= ns;
+        }
+        String on = "" + name;
+        String os = "" + source;
+        this.names[this.n] #= on;
+        this.sources[this.n] #= os;
+        this.n = this.n + 1;
+        return this;
+    }
+
+    public #String load(String name) {
+        int32 i = 0;
+        while (i < this.n) {
+            if (this.names[i].equals(name)) {
+                return "" + this.sources[i];
+            }
+            i = i + 1;
+        }
+        throw heap JinjaException("template '" + name
+            + "' not found (MapLoader with " + this.n + " entries)",
+            0, 0);
+    }
+}

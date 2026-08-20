@@ -1,0 +1,31 @@
+package dev.cajeta.jinja;
+
+import cajeta.io.file.File;
+import cajeta.io.file.Path;
+import cajeta.lang.String;
+
+/**
+ * Loads template sources from `root`/name (plan 8.2.1). A missing file
+ * fails loudly naming template and root — never returns something
+ * plausible (spec 2.22 discipline applied to loading).
+ */
+public final class FileSystemLoader implements JinjaLoader {
+    String root;
+
+    public FileSystemLoader(String root) {
+        this.root = "" + root;
+    }
+
+    public #String load(String name) {
+        String full = this.root + "/" + name;
+        Path p #= Path.of(full);
+        if (p.isFile() == false) {
+            throw heap JinjaException("template '" + name
+                + "' not found (FileSystemLoader at '" + this.root
+                + "')", 0, 0);
+        }
+        int8[] bytes #= File.readAllBytes(full);
+        int32 n = (int32) bytes.count();
+        return heap String(#bytes, n);
+    }
+}

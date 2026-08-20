@@ -1,0 +1,99 @@
+package dev.cajeta.jinja.test;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.jinja.Environment;
+import dev.cajeta.jinja.Template;
+import dev.cajeta.jinja.JinjaException;
+import dev.cajeta.jinja.MapLoader;
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonValue;
+import cajeta.lang.String;
+
+/**
+ * cajeta-jinja plan Unit 8 TDD — inheritance and includes.
+ *
+ * Resolution is COMPILE-time through the caller-supplied loader
+ * (spec 2.12): extends chains link super() levels, includes inline to
+ * a fixed point, and a compiled Template renders loader-free. Oracle-
+ * pinned: a child's top-level statements EXECUTE (sets bind) but
+ * render nothing; includes share the surrounding scope for reads and
+ * keep their writes; super() chains through every level.
+ */
+public class InheritTest {
+
+    public InheritTest() { return; }
+
+    /** 8.1.1 + 8.1.2 + 8.3.1 — the multi-file fixture: two-level
+     *  extends, chained super(), include-in-block, nested include. */
+    @Test
+    public void multiFileFixtureMatches() {
+        HarnessTest.renderAndCompare("inherit");
+    }
+
+    /** 8.2.1 — the in-memory loader drives the same machinery. */
+    @Test
+    public void mapLoaderWorks() {
+        MapLoader ml = heap MapLoader();
+        ml.put("base.j2", "A[{% block b %}base{% endblock %}]Z");
+        Environment env = heap Environment();
+        env.loader(#ml);
+        Template t #= env.compile(
+            "{% extends 'base.j2' %}{% block b %}kid+{{ super() }}{% endblock %}");
+        JsonValue ctx #= Json.parse("{}");
+        String out #= t.render(ctx);
+        Assert.isTrue(out.equals("A[kid+base]Z"));
+    }
+
+    /** 8.1.3 — a missing template names the template AND the loader. */
+    @Test
+    public void missingTemplateNamesTemplateAndLoader() {
+        MapLoader ml = heap MapLoader();
+        Environment env = heap Environment();
+        env.loader(#ml);
+        boolean threw = false;
+        try {
+            Template t #= env.compile("{% include 'nope.j2' %}");
+            threw = t == null;               // never
+        } catch (JinjaException e) {
+            threw = true;
+            Assert.isTrue(e.getMessage().contains("nope.j2"));
+            Assert.isTrue(e.getMessage().contains("MapLoader"));
+        }
+        Assert.isTrue(threw);
+    }
+
+    /** super() with no parent block is a loud error. */
+    @Test
+    public void superWithoutParentFails() {
+        Environment env = heap Environment();
+        JsonValue ctx #= Json.parse("{}");
+        Template t #= env.compile(
+            "A{% block b %}{{ super() }}{% endblock %}");
+        boolean threw = false;
+        try {
+            String out #= t.render(ctx);
+            threw = out == null;             // never
+        } catch (JinjaException e) {
+            threw = true;
+        }
+        Assert.isTrue(threw);
+    }
+
+    /** Dynamic template names are outside compile-time resolution and
+     *  say so. */
+    @Test
+    public void dynamicNamesFailLoudly() {
+        MapLoader ml = heap MapLoader();
+        Environment env = heap Environment();
+        env.loader(#ml);
+        boolean threw = false;
+        try {
+            Template t #= env.compile("{% include name_var %}");
+            threw = t == null;               // never
+        } catch (JinjaException e) {
+            threw = true;
+            Assert.isTrue(e.getMessage().contains("string-literal"));
+        }
+        Assert.isTrue(threw);
+    }
+}

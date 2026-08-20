@@ -62,6 +62,21 @@ final class Parser {
         return #ps.nd;
     }
 
+    /** Parse a token stream INTO an existing node table (extends/
+     *  include inlining — one table so indices interoperate).
+     *  Returns the chain head. */
+    static int32 parseChainInto(Node table, Tok tokens) {
+        Parser ps = heap Parser();
+        ps.tk = tokens;
+        ps.nd = table;
+        int32 head = ps.parseBlock();
+        if (ps.endTag != null) {
+            ps.fail("unexpected '{% " + ps.endTag
+                + " %}' outside any open block");
+        }
+        return head;
+    }
+
     // ── cursor helpers ─────────────────────────────────────────────────
 
     int32 kindAt(int32 i) {
@@ -146,7 +161,7 @@ final class Parser {
         return this.wordIs(i, "endif") || this.wordIs(i, "endfor")
             || this.wordIs(i, "endwith") || this.wordIs(i, "endset")
             || this.wordIs(i, "endmacro") || this.wordIs(i, "endcall")
-            || this.wordIs(i, "endfilter")
+            || this.wordIs(i, "endfilter") || this.wordIs(i, "endblock")
             || this.wordIs(i, "else") || this.wordIs(i, "elif");
     }
 
@@ -185,6 +200,10 @@ final class Parser {
                     this.endTag #= "" + ender;
                     if (this.endTag.equals("elif")) {
                         this.endExpr = this.parseExpr();
+                    }
+                    if (this.endTag.equals("endblock")
+                            && this.cur() == Tok.K_NAME) {
+                        this.p = this.p + 1;   // {% endblock name %}
                     }
                     this.expect(Tok.K_STMT_CLOSE, "'%}'");
                     return head;
@@ -271,6 +290,32 @@ final class Parser {
         }
         if (this.atWord("filter")) {
             return this.parseFilterBlock(line);
+        }
+        if (this.atWord("extends")) {
+            int32 node = this.nd.add(Node.N_EXTENDS, line);
+            this.nd.setA(node, this.parseExpr());
+            this.expect(Tok.K_STMT_CLOSE, "'%}'");
+            return node;
+        }
+        if (this.atWord("include")) {
+            int32 node = this.nd.add(Node.N_INCLUDE, line);
+            this.nd.setA(node, this.parseExpr());
+            this.expect(Tok.K_STMT_CLOSE, "'%}'");
+            return node;
+        }
+        if (this.atWord("block")) {
+            if (this.cur() != Tok.K_NAME) {
+                this.fail("expected a block name after '{% block'");
+            }
+            int32 node = this.nd.add(Node.N_BLOCK, line);
+            String bname #= this.tk.spanText(this.p);
+            this.nd.setStr(node, #bname);
+            this.p = this.p + 1;
+            this.expect(Tok.K_STMT_CLOSE, "'%}'");
+            int32 body = this.parseBlock();
+            this.nd.setB(node, body);
+            this.expectEnd("endblock", "block", line);
+            return node;
         }
         String kw #= this.tk.spanText(this.p);
         throw heap JinjaException("unsupported construct '{% " + kw

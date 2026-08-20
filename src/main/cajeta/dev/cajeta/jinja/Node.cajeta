@@ -38,33 +38,42 @@ final class Node {
     static final int32 N_CALLBLK = 9; // a = the E_CALL, b = body,
                                      // c = block params chain
     static final int32 N_FILTBLK = 10; // str = filter, a = args, b = body
+    static final int32 N_EXTENDS = 11; // a = child chain (blocks
+                                     //   unlinked), b = parent chain;
+                                     //   at parse: a = name expr
+    static final int32 N_BLOCK = 12; // str = name, b = body,
+                                     // c = super-level N_BLOCK|-1
+    static final int32 N_INCLUDE = 13; // a = name expr,
+                                     // b = inlined chain
 
-    // ── expression kinds ───────────────────────────────────────────────
-    static final int32 E_STR = 10;   // str = unescaped value
-    static final int32 E_NUM = 11;   // str = raw text, d = 1 if float
-    static final int32 E_TRUE = 12;
-    static final int32 E_FALSE = 13;
-    static final int32 E_NONE = 14;
-    static final int32 E_NAME = 15;  // str
-    static final int32 E_ATTR = 16;  // a = obj, str = attr
-    static final int32 E_INDEX = 17; // a = obj, b = index
-    static final int32 E_SLICE = 18; // a = obj, b = start|-1, c = stop|-1,
+    // ── expression kinds (20+ — DISJOINT from statement kinds: whole-
+    // table scans like include resolution test k(i) without knowing
+    // whether a node is a statement or an expression) ───────────────────────────────────────────────
+    static final int32 E_STR = 20;   // str = unescaped value
+    static final int32 E_NUM = 21;   // str = raw text, d = 1 if float
+    static final int32 E_TRUE = 22;
+    static final int32 E_FALSE = 23;
+    static final int32 E_NONE = 24;
+    static final int32 E_NAME = 25;  // str
+    static final int32 E_ATTR = 26;  // a = obj, str = attr
+    static final int32 E_INDEX = 27; // a = obj, b = index
+    static final int32 E_SLICE = 28; // a = obj, b = start|-1, c = stop|-1,
                                      // e = step|-1
-    static final int32 E_CALL = 19;  // a = callee, b = args chain
-    static final int32 E_FILTER = 20; // a = value, str = name, b = args
-    static final int32 E_TEST = 21;  // a = value, str = name, d = negated,
+    static final int32 E_CALL = 29;  // a = callee, b = args chain
+    static final int32 E_FILTER = 30; // a = value, str = name, b = args
+    static final int32 E_TEST = 31;  // a = value, str = name, d = negated,
                                      // b = args
-    static final int32 E_BIN = 22;   // a, b, str = op
-    static final int32 E_NOT = 23;   // a
-    static final int32 E_NEG = 24;   // a
-    static final int32 E_POS = 25;   // a  (unary +)
-    static final int32 E_COND = 26;  // a = cond, b = then, c = else|-1
-    static final int32 E_LIST = 27;  // a = items chain
-    static final int32 E_DICT = 28;  // a = pairs chain
-    static final int32 E_PAIR = 29;  // a = key, b = value
-    static final int32 E_KWARG = 30; // str = name, a = value
-    static final int32 E_CMP = 31;   // a = first operand, b = op chain
-    static final int32 E_CMPOP = 32; // str = op, a = operand, nx = next
+    static final int32 E_BIN = 32;   // a, b, str = op
+    static final int32 E_NOT = 33;   // a
+    static final int32 E_NEG = 34;   // a
+    static final int32 E_POS = 35;   // a  (unary +)
+    static final int32 E_COND = 36;  // a = cond, b = then, c = else|-1
+    static final int32 E_LIST = 37;  // a = items chain
+    static final int32 E_DICT = 38;  // a = pairs chain
+    static final int32 E_PAIR = 39;  // a = key, b = value
+    static final int32 E_KWARG = 40; // str = name, a = value
+    static final int32 E_CMP = 41;   // a = first operand, b = op chain
+    static final int32 E_CMPOP = 42; // str = op, a = operand, nx = next
                                      //   ("==", "!=", "<", "<=", ">",
                                      //    ">=", "in", "notin") — Jinja
                                      //   comparisons CHAIN (1 < 2 < 3)

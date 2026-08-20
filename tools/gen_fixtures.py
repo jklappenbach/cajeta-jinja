@@ -46,6 +46,9 @@ def build_env(settings: dict) -> jinja2.Environment:
         # transformers enables loopcontrols; the engine always supports
         # break/continue (spec 2.11), so the oracle must too.
         extensions=["jinja2.ext.loopcontrols"],
+        # extends/include resolve within the fixture directory — the
+        # engine side mirrors this with a FileSystemLoader (Unit 8).
+        loader=jinja2.FileSystemLoader(str(settings.get("_dir"))),
         trim_blocks=settings.get("trim_blocks", False),
         lstrip_blocks=settings.get("lstrip_blocks", False),
         autoescape=settings.get("autoescape", False),
@@ -82,6 +85,7 @@ def main() -> int:
         st_path = d / "settings.json"
         settings = (json.loads(st_path.read_text(encoding="utf-8"))
                     if st_path.is_file() else {})
+        settings["_dir"] = d
         env = build_env(settings)
         out = env.from_string(template).render(**context)
         (d / "expected.out").write_bytes(out.encode("utf-8"))

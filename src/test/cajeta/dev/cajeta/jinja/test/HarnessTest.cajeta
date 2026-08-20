@@ -2,6 +2,7 @@ package dev.cajeta.jinja.test;
 
 import dev.cajeta.unit.Assert;
 import dev.cajeta.jinja.Environment;
+import dev.cajeta.jinja.FileSystemLoader;
 import dev.cajeta.jinja.Template;
 import dev.cajeta.jinja.JinjaException;
 import cajeta.codec.json.Json;
@@ -45,6 +46,7 @@ public class HarnessTest {
      *  never drift. Missing file = all defaults. */
     static #Environment envFor(String base) {
         Environment env = heap Environment();
+        env.loader(#heap FileSystemLoader(base));
         int8[] raw #= File.readAllBytes(base + "/settings.json");
         JsonValue v #= Json.parse(raw, (int64) raw.count());
         JsonObject o = v.object();
@@ -164,17 +166,16 @@ public class HarnessTest {
     /** Spec 2.22 discipline from day one: a construct the engine cannot
      *  render fails LOUDLY, naming the construct and line — never
      *  renders something subtly wrong. The guard construct moves as
-     *  units land ({{ }} with Unit 3, statements with Unit 4, macros
-     *  with Unit 6); it sits on `{% extends %}` (loader-backed
-     *  inheritance, spec 2.12) and fires at COMPILE time (spec
-     *  5.2/5.3). */
+     *  units land (expressions, statements, macros, inheritance); it
+     *  sits on `{% do %}` — outside the supported set — and fires at
+     *  COMPILE time (spec 5.2/5.3). */
     @Test
     public void unsupportedConstructFailsLoudly() {
         Environment env = heap Environment();
         boolean threw = false;
         try {
             Template t #= env.compile(
-                "line one\n{% extends 'base.j2' %}\n");
+                "line one\n{% do thing %}\n");
             threw = t == null;   // unreachable
         } catch (JinjaException e) {
             threw = true;

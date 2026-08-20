@@ -1,0 +1,5 @@
+{% extends 'mid.j2' %}
+{% set shared = 'S' %}
+{% block head %}CHILD+{{ super() }}{% endblock %}
+{% block body %}{% set x = 7 %}[{% include 'part.j2' %}]{{ inc_local is defined }}{% endblock %}
+IGNORED TEXT

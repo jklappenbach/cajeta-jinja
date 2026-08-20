@@ -124,13 +124,14 @@ public class StmtTest {
     }
 
     /** Constructs outside the supported set still fail loudly BY
-     *  NAME (macro/call/filter/raw joined the set with Unit 6). */
+     *  NAME — and extends/include WITHOUT a loader fail at compile
+     *  naming the missing loader (Unit 8 made them real). */
     @Test
     public void unsupportedStatementsFailLoudly() {
         Assert.isTrue(StmtTest.compileFails(
-            "{% extends 'base.j2' %}"));
+            "{% extends 'base.j2' %}"));      // no loader configured
         Assert.isTrue(StmtTest.compileFails(
-            "{% include 'part.j2' %}"));
+            "{% include 'part.j2' %}"));      // no loader configured
         Assert.isTrue(StmtTest.compileFails(
             "{% for i in [1] recursive %}x{% endfor %}"));
         Assert.isTrue(StmtTest.compileFails("{% set a, b = 1 %}"));

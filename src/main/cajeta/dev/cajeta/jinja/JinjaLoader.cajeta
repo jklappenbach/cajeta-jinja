@@ -1,0 +1,20 @@
+package dev.cajeta.jinja;
+
+import cajeta.lang.String;
+
+/**
+ * Template source resolution for `{% extends %}` / `{% include %}`
+ * (spec 2.12, plan 8.2.1): caller-supplied, never inferred. `load`
+ * returns the template SOURCE for a name, or throws JinjaException
+ * naming both the template and the loader (spec 8.1.3).
+ *
+ * Resolution happens at COMPILE time — Environment.compile inlines
+ * every referenced template into the compiled node table, so a
+ * Template renders with no loader in reach (spec 5.2) and template
+ * names must be string literals (a dynamic `{% include var %}` fails
+ * loudly at compile).
+ */
+public interface JinjaLoader {
+    /** The source of template `name`, or a loud JinjaException. */
+    public #String load(String name);
+}

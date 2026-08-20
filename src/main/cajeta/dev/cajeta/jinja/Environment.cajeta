@@ -22,6 +22,7 @@ import cajeta.lang.String;
  * Setters chain: `heap Environment().trimBlocks(true).lstripBlocks(true)`.
  */
 public final class Environment {
+    JinjaLoader loaderRef;
     boolean trimBlocksFlag;
     boolean lstripBlocksFlag;
     boolean autoescapeFlag;
@@ -29,6 +30,7 @@ public final class Environment {
     int64 nowEpochSecondsVal;
 
     public Environment() {
+        this.loaderRef = null;
         this.trimBlocksFlag = false;
         this.lstripBlocksFlag = false;
         this.autoescapeFlag = false;
@@ -74,10 +76,19 @@ public final class Environment {
      * settings, so later Environment mutation does not change an
      * already-compiled template's output.
      */
+    /** The template loader for extends/include (spec 2.12) — a
+     *  caller-supplied choice, transferred in (the Environment owns
+     *  it). */
+    public Environment loader(#JinjaLoader l) {
+        this.loaderRef #= l;
+        return this;
+    }
+
     public #Template compile(String source) {
         Template t #= heap Template(source, this.trimBlocksFlag,
             this.lstripBlocksFlag, this.autoescapeFlag,
-            this.strictUndefinedFlag, this.nowEpochSecondsVal);
+            this.strictUndefinedFlag, this.nowEpochSecondsVal,
+            this.loaderRef);
         return #= t;
     }
 }
