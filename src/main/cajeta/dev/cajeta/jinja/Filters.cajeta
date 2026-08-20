@@ -290,8 +290,39 @@ final class Filters {
 
     // ── the dispatcher ─────────────────────────────────────────────────
 
+    static boolean preservesSafety(String name) {
+        return name.equals("upper") || name.equals("lower")
+            || name.equals("title") || name.equals("capitalize")
+            || name.equals("trim") || name.equals("replace")
+            || name.equals("indent");
+    }
+
     static #JsonValue apply(Eval ev, String name, JsonValue v,
             int32 args, int32 line) {
+        if (ev.isSafe(v)) {
+            // Safety belongs to the VALUE: escape/safe are idempotent,
+            // string-method filters preserve Markup, format escapes its
+            // arguments; everything else operates on the inner string.
+            if (name.equals("safe") || name.equals("escape")
+                    || name.equals("e")) {
+                return #Eval.copy(v);
+            }
+            if (name.equals("format")) {
+                String fmt #= ev.text(v, line);
+                return #ev.wrapSafe(Filters.pformat(ev, fmt, args,
+                    line, true));
+            }
+            if (Filters.preservesSafety(name)) {
+                JsonValue r #= Filters.apply(ev, name,
+                    ev.safeInner(v), args, line);
+                if (r == null) {
+                    return null;
+                }
+                return #ev.wrapSafe(#r);
+            }
+            return #Filters.apply(ev, name, ev.safeInner(v), args,
+                line);
+        }
         if (name.equals("upper")) {
             String s #= ev.text(v, line);
             return #Eval.str(s.toUpperCase());
@@ -438,16 +469,16 @@ final class Filters {
         }
         if (name.equals("escape") || name.equals("e")) {
             String s #= ev.text(v, line);
-            return #Eval.str(Filters.htmlEscape(s));
+            String esc #= Filters.htmlEscape(s);
+            return #ev.wrapSafeText(esc);
         }
         if (name.equals("safe")) {
-            // Identity while autoescape is off (Unit 7 adds marking).
             String s #= ev.text(v, line);
-            return #Eval.str(s);
+            return #ev.wrapSafeText(s);
         }
         if (name.equals("format")) {
             String s #= ev.text(v, line);
-            return #Filters.pformat(ev, s, args, line);
+            return #Filters.pformat(ev, s, args, line, false);
         }
         if (name.equals("string")) {
             String s #= ev.text(v, line);
@@ -638,11 +669,28 @@ final class Filters {
             }
             int32 attrN = Filters.argAt(ev, args, 9999, "attribute");
             JsonArray items #= Filters.toItems(ev, v, line);
+            // join is eval-context-aware in Jinja: the Markup path
+            // exists only under autoescape (oracle-verified).
+            boolean anySafe = false;
+            if (ev.autoescape) {
+                int32 si = 0;
+                while (si < items.count()) {
+                    if (ev.isSafe(items.get(si))) {
+                        anySafe = true;
+                    }
+                    si = si + 1;
+                }
+            }
             Buf b = heap Buf();
             int32 i = 0;
             while (i < items.count()) {
                 if (i > 0) {
-                    b.addStr(sep);
+                    if (anySafe) {
+                        String esep #= Filters.htmlEscape(sep);
+                        b.addStr(esep);
+                    } else {
+                        b.addStr(sep);
+                    }
                 }
                 JsonValue item = items.get(i);
                 if (attrN >= 0) {
@@ -651,11 +699,17 @@ final class Filters {
                         line);
                     String t #= ev.text(av, line);
                     b.addStr(t);
+                } else if (anySafe) {
+                    String t3 #= ev.sideText(item, line);
+                    b.addStr(t3);
                 } else {
                     String t2 #= ev.text(item, line);
                     b.addStr(t2);
                 }
                 i = i + 1;
+            }
+            if (anySafe) {
+                return #ev.wrapSafeText(b.take());
             }
             return #Eval.str(b.take());
         }
@@ -984,7 +1038,8 @@ final class Filters {
             boolean indent = Filters.argAt(ev, args, 0, "indent") >= 0;
             Buf b = heap Buf();
             Filters.writeJson(ev, b, v, indent, 0, line);
-            return #Eval.str(b.take());
+            // \u-escaping of <>&' makes the output HTML-safe: Markup.
+            return #ev.wrapSafeText(b.take());
         }
         ev.err("unsupported filter '" + name + "'", line);
         return null;                         // unreachable
@@ -1074,7 +1129,7 @@ final class Filters {
     /** Python %-formatting, the subset templates use: %s %d %i %f
      *  %.Nf %x %% — loud on anything else. */
     static #JsonValue pformat(Eval ev, String fmt, int32 args,
-            int32 line) {
+            int32 line, boolean safeMode) {
         Buf b = heap Buf();
         int32 n = fmt.byteLength();
         int32 argN = 0;
@@ -1117,8 +1172,13 @@ final class Filters {
             argN = argN + 1;
             JsonValue av #= ev.eval(an);
             if (d == 115) {                  // %s
-                String t #= ev.text(av, line);
-                b.addStr(t);
+                if (safeMode) {
+                    String t #= ev.sideText(av, line);
+                    b.addStr(t);
+                } else {
+                    String t2 #= ev.text(av, line);
+                    b.addStr(t2);
+                }
             } else if (d == 100 || d == 105) {  // %d %i
                 b.addStr("" + Eval.toI64(av));
             } else if (d == 102) {           // %f / %.Nf

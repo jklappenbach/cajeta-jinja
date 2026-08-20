@@ -1,0 +1,32 @@
+package dev.cajeta.jinja.test;
+
+/**
+ * cajeta-jinja plan Unit 7 TDD — autoescaping.
+ *
+ * The oracle's sharpest lesson: Markup COMPOSITION is independent of
+ * the environment flag — `('<i>' | safe) ~ user` escapes `user` even
+ * with autoescape OFF, because safety is a property of the VALUE. The
+ * flag controls exactly two things: whether `{{ }}` escapes unsafe
+ * values, and whether macro/caller/set-block/filter-block outputs are
+ * wrapped safe. Both fixtures render the SAME template under the two
+ * settings (spec 4.3: chosen by the consumer, never inferred).
+ */
+public class AutoescapeTest {
+
+    public AutoescapeTest() { return; }
+
+    /** 7.1.1 + 7.1.3 + 7.3.1 — escaping, safe/escape idempotence,
+     *  concat/join/format composition, macro/set/filter-block wrapping,
+     *  all with autoescape ON. */
+    @Test
+    public void autoescapeOnMatches() {
+        HarnessTest.renderAndCompare("html-autoescape");
+    }
+
+    /** 7.1.2 — the SAME template with autoescape OFF: output unescaped,
+     *  but value-level Markup composition still applies. */
+    @Test
+    public void autoescapeOffMatches() {
+        HarnessTest.renderAndCompare("html-noescape");
+    }
+}

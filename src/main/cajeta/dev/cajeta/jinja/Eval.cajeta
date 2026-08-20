@@ -44,6 +44,7 @@ final class Eval {
     Node nd;
     JsonValue ctx;           // root context (borrow for the render call)
     boolean strict;
+    boolean autoescape;
     int64 nowEpoch;          // injected clock; 0 = unset (spec 2.21)
 
     Buf out;
@@ -91,6 +92,7 @@ final class Eval {
         this.nd = null;
         this.ctx = null;
         this.strict = false;
+        this.autoescape = false;
         this.nowEpoch = 0;
         this.out = heap Buf();
         this.lastUndef = "";
@@ -270,6 +272,32 @@ final class Eval {
         return #v;
     }
 
+    /** Markup: a SAFE string is {"__jinja_safe__": inner}. Safety is
+     *  a property of the VALUE (composition applies even with
+     *  autoescape off — oracle-verified); the environment flag only
+     *  gates output escaping and block-output wrapping. */
+    boolean isSafe(JsonValue v) {
+        return v != null && v.kind() == JsonValue.OBJECT
+            && v.object().containsKey("__jinja_safe__");
+    }
+
+    /** Borrow of the inner string value of a safe handle. */
+    JsonValue safeInner(JsonValue v) {
+        return v.object().get("__jinja_safe__");
+    }
+
+    #JsonValue wrapSafe(#JsonValue inner) {
+        JsonObject h = heap JsonObject();
+        Eval.putKey(h, "__jinja_safe__", #inner);
+        JsonValue v = heap JsonValue();
+        v.setObject(#h);
+        return #v;
+    }
+
+    #JsonValue wrapSafeText(String s) {
+        return #this.wrapSafe(Eval.str(s));
+    }
+
     /** Registry id behind a handle, or -1. */
     int32 handleId(JsonValue v, String marker) {
         if (v == null || v.kind() != JsonValue.OBJECT) {
@@ -344,7 +372,12 @@ final class Eval {
         if (k == Node.N_OUT) {
             JsonValue v #= this.eval(this.nd.a(i));
             String s #= this.text(v, line);
-            this.out.addStr(s);
+            if (this.autoescape && this.isSafe(v) == false) {
+                String esc #= Filters.htmlEscape(s);
+                this.out.addStr(esc);
+            } else {
+                this.out.addStr(s);
+            }
             return;
         }
         if (k == Node.N_IF) {
@@ -394,10 +427,21 @@ final class Eval {
             this.out.n = mark;
             JsonValue sv = heap JsonValue();
             sv.setStringOwned(#captured, m);
-            JsonValue fv #= Filters.apply(this, this.nd.strOf(i), sv,
+            JsonValue blk = null;
+            if (this.autoescape) {
+                blk #= this.wrapSafe(#sv);
+            } else {
+                blk #= sv;
+            }
+            JsonValue fv #= Filters.apply(this, this.nd.strOf(i), blk,
                 this.nd.a(i), line);
             String t #= this.text(fv, line);
-            this.out.addStr(t);
+            if (this.autoescape && this.isSafe(fv) == false) {
+                String esc #= Filters.htmlEscape(t);
+                this.out.addStr(esc);
+            } else {
+                this.out.addStr(t);
+            }
             return;
         }
         if (k == Node.N_BREAK) {
@@ -432,7 +476,11 @@ final class Eval {
             this.out.n = mark;
             JsonValue sv = heap JsonValue();
             sv.setStringOwned(#captured, m);
-            v #= sv;
+            if (this.autoescape) {
+                v #= this.wrapSafe(#sv);
+            } else {
+                v #= sv;
+            }
         }
         int32 dot = target.indexOf(".");
         if (dot < 0) {
@@ -855,6 +903,9 @@ final class Eval {
 
     /** Jinja's `str()` for interpolation. */
     #String text(JsonValue v, int32 line) {
+        if (this.isSafe(v)) {
+            return #this.text(this.safeInner(v), line);
+        }
         if (v == null) {
             if (this.strict) {
                 this.undefErr(line);
@@ -1381,15 +1432,34 @@ final class Eval {
         JsonValue l3 #= this.eval(this.nd.a(i));
         JsonValue r #= this.eval(this.nd.b(i));
         if (op.equals("~")) {
-            String ls #= this.text(l3, line);
-            String rs #= this.text(r, line);
-            return #Eval.str(ls + rs);
+            // `~` is the ENVIRONMENT's concat: Markup composition only
+            // under autoescape (markup_join vs str_join — oracle-
+            // verified). `+` below stays value-level (Python Markup).
+            if (this.autoescape
+                    && (this.isSafe(l3) || this.isSafe(r))) {
+                String ls #= this.sideText(l3, line);
+                String rs #= this.sideText(r, line);
+                return #this.wrapSafeText(ls + rs);
+            }
+            String ls2 #= this.text(l3, line);
+            String rs2 #= this.text(r, line);
+            return #Eval.str(ls2 + rs2);
         }
         // Arithmetic below: undefined raises in BOTH modes.
         if (l3 == null || r == null) {
             this.undefErr(line);
         }
         if (op.equals("+")) {
+            if (this.isSafe(l3) || this.isSafe(r)) {
+                boolean bothStringy =
+                    (this.isSafe(l3) || l3.kind() == JsonValue.STRING)
+                    && (this.isSafe(r) || r.kind() == JsonValue.STRING);
+                if (bothStringy) {
+                    String ls #= this.sideText(l3, line);
+                    String rs #= this.sideText(r, line);
+                    return #this.wrapSafeText(ls + rs);
+                }
+            }
             if (l3.kind() == JsonValue.STRING
                     && r.kind() == JsonValue.STRING) {
                 return #Eval.str(l3.asString() + r.asString());
@@ -1562,6 +1632,16 @@ final class Eval {
             return #Eval.num(xi - yi);
         }
         return #Eval.num(xi * yi);           // "*"
+    }
+
+    /** One side of a Markup composition: safe -> raw inner text,
+     *  unsafe -> escaped text. */
+    #String sideText(JsonValue v, int32 line) {
+        if (this.isSafe(v)) {
+            return #this.text(v, line);
+        }
+        String t #= this.text(v, line);
+        return #Filters.htmlEscape(t);
     }
 
     /** Chained comparison: every operand evaluated once, pairwise ops
@@ -2303,6 +2383,9 @@ final class Eval {
         this.callerRootEnd = savedCRoot;
         JsonValue v = heap JsonValue();
         v.setStringOwned(#produced, m);
+        if (this.autoescape) {
+            return #this.wrapSafe(#v);       // body escaped inline
+        }
         return #v;
     }
 
@@ -2372,6 +2455,9 @@ final class Eval {
         this.callerParams = savedParams;
         JsonValue v = heap JsonValue();
         v.setStringOwned(#produced, m);
+        if (this.autoescape) {
+            return #this.wrapSafe(#v);
+        }
         return #v;
     }
 

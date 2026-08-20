@@ -1,0 +1,14 @@
+<b>&'x|<b>&'x|&lt;b&gt;&amp;&#39;x|&lt;b&gt;&amp;&#39;x
+<i><b>&'x|<i><b>&'x|<i>&lt;b&gt;&amp;&#39;x
+<a>, <b>|<a>, <b>
+<<b>&'x>|<&lt;b&gt;&amp;&#39;x>
+
+<table>
+  <tr><td>a&b</td></tr>
+  <tr><td><c></td></tr>
+</table>
+<b><b>&'x</b>
+<B><B>&'X</B>
+<B>|<B>&'X|5|None
+<b>&'x|6
+{"k": "\u003cv\u003e"}

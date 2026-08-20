@@ -46,6 +46,7 @@ public final class Template {
         ev.nd = this.nd;
         ev.ctx = context;
         ev.strict = this.strictUndefinedFlag;
+        ev.autoescape = this.autoescapeFlag;
         ev.nowEpoch = this.nowEpochSecondsVal;
         return #ev.render();
     }

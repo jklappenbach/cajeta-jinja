@@ -1,0 +1,13 @@
+{{ user }}|{{ user | safe }}|{{ user | escape }}|{{ (user | escape) | escape }}
+{{ '<i>' ~ user }}|{{ ('<i>' | safe) ~ user }}|{{ ('<i>' | safe) + user }}
+{{ ['<a>', ('<b>' | safe)] | join(', ') }}|{{ ['<a>', '<b>'] | join(', ') }}
+{{ '<%s>' | format(user) }}|{{ ('<%s>' | safe) | format(user) }}
+{% macro row(v) %}<td>{{ v }}</td>{% endmacro %}
+<table>
+{% for it in items %}  <tr>{{ row(it) }}</tr>
+{% endfor %}</table>
+{% set cell %}<b>{{ user }}</b>{% endset %}{{ cell }}
+{% filter upper %}<b>{{ user }}</b>{% endfilter %}
+{{ ('<b>' | safe) | upper }}|{{ user | upper }}|{{ 5 }}|{{ none }}
+{% set s = user | safe %}{{ s }}|{{ (user | safe) | length }}
+{{ {'k': '<v>'} | tojson }}
