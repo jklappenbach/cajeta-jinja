@@ -1,0 +1,19 @@
+{%- set ns = namespace(total=0, seen='') -%}
+{%- for row in table -%}
+  {%- if row.skip is defined and row.skip -%}
+    {%- continue -%}
+  {%- endif -%}
+  {%- for cell in row.cells if cell > 0 -%}
+    {%- set ns.total = ns.total + cell -%}
+    {{ cell }}{% if not loop.last %},{% endif -%}
+  {%- else -%}
+    (none)
+  {%- endfor -%}
+  {%- set ns.seen = ns.seen ~ loop.index -%}
+  {%- if ns.total > 90 -%}{%- break -%}{%- endif -%}
+  ;
+{%- else -%}
+  EMPTY
+{%- endfor -%}
+|total={{ ns.total }} seen={{ ns.seen }}
+{%- with cap = ns.total * 2 %} cap={{ cap }}{% endwith -%}

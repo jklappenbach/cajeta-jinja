@@ -19,9 +19,19 @@ final class Node {
 
     static final int32 W = 8;      // kind, a, b, c, d, nx, line, e
 
-    // ── statement kinds (Unit 4 grows this set) ────────────────────────
+    // ── statement kinds ────────────────────────────────────────────────
     static final int32 N_TEXT = 0;   // str = literal text
     static final int32 N_OUT = 1;    // a = expr
+    static final int32 N_IF = 2;     // a = cond, b = then, c = else|-1
+                                     //   (elif = nested N_IF in c)
+    static final int32 N_FOR = 3;    // a = iter, b = body, c = else|-1,
+                                     // str = "i" or "a,b,c", d = count,
+                                     // e = loop filter|-1
+    static final int32 N_SET = 4;    // str = "x" or "ns.attr";
+                                     // a = expr|-1, b = block body|-1
+    static final int32 N_WITH = 5;   // a = E_KWARG chain, b = body
+    static final int32 N_BREAK = 6;
+    static final int32 N_CONTINUE = 7;
 
     // ── expression kinds ───────────────────────────────────────────────
     static final int32 E_STR = 10;   // str = unescaped value

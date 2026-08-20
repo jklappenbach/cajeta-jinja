@@ -1,0 +1,7 @@
+{% for i in [] %}x{% else %}EMPTY{% endfor %}|{% for i in 'ab' %}[{{ i }}]{% endfor %}
+{% for k, v in d.items() %}{{ k }}={{ v }};{% endfor %}|{% for k in d %}{{ k }},{% endfor %}
+{% for i in 'abc' %}{{ loop.index }}{{ loop.index0 }}{{ loop.revindex }}{{ loop.revindex0 }}{{ loop.first }}{{ loop.last }}{{ loop.length }}|{% endfor %}
+{% for i in 'abc' %}({{ loop.previtem is defined }},{{ loop.previtem }},{{ loop.nextitem }}){% endfor %}
+{% for i in range(5) %}{{ loop.cycle('a', 'b', 'c') }}{% endfor %}|{% for i in range(6) if i % 2 == 0 %}{{ loop.index }}:{{ i }}/{{ loop.length }} {% endfor %}
+{% for i in 'ab' %}{% for i in 'xy' %}{{ i }}{% endfor %}{{ i }}{% endfor %}|{% for a, b, c in [[1, 2, 3], [4, 5, 6]] %}{{ a }}{{ b }}{{ c }};{% endfor %}
+{% for i in [1, 3] if i % 2 == 0 %}x{% else %}NONE{% endfor %}

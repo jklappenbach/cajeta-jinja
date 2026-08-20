@@ -1,0 +1,220 @@
+package dev.cajeta.jinja.test;
+
+import dev.cajeta.unit.Assert;
+import dev.cajeta.jinja.Environment;
+import dev.cajeta.jinja.Template;
+import dev.cajeta.jinja.JinjaException;
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonValue;
+import cajeta.lang.String;
+
+/**
+ * cajeta-jinja plan Unit 4 TDD — statements, scoping, and loops.
+ *
+ * The oracle-probed semantics the fixtures pin (all verified against
+ * Jinja2 3.1.6 with loopcontrols):
+ *
+ *  - `if` creates NO scope; `for` bodies are per-ITERATION scopes;
+ *    `with` is a scope; `set` binds in the current scope only — the
+ *    classic "set inside for does not survive the loop".
+ *  - `for/else` runs iff NO iteration ran the body to COMPLETION:
+ *    break AND continue both skip the completion flag, so a loop whose
+ *    every iteration continued still renders the else arm. This is
+ *    Jinja's actual codegen behaviour, not Python's for/else.
+ *  - `loop.*` includes previtem/nextitem (undefined at the edges) and
+ *    cycle(); with a loop FILTER, length/last/revindex are over the
+ *    FILTERED items and the filter cannot see `loop`.
+ *  - `namespace()` is REFERENCE semantics: `set n2 = n1` aliases, and
+ *    attribute writes cross scope boundaries.
+ *  - `with`-assignments evaluate in the OUTER scope.
+ */
+public class StmtTest {
+
+    public StmtTest() { return; }
+
+    /** 4.1.1 — if/elif/else per Jinja truthiness. */
+    @Test
+    public void ifBranchesMatch() {
+        HarnessTest.renderAndCompare("stmt-if");
+    }
+
+    /** 4.1.1 + 4.1.2 — for/else, tuple unpacking, dict/string
+     *  iteration, nested shadowing, the full loop.* matrix, cycle(),
+     *  and the loop filter. */
+    @Test
+    public void forLoopsMatch() {
+        HarnessTest.renderAndCompare("stmt-for");
+    }
+
+    /** 4.1.3 — the set/with scoping matrix, block-set included. */
+    @Test
+    public void scopingMatches() {
+        HarnessTest.renderAndCompare("stmt-scope");
+    }
+
+    /** 4.1.5 — break/continue with loopcontrols semantics, including
+     *  the for/else completion flag. */
+    @Test
+    public void loopControlsMatch() {
+        HarnessTest.renderAndCompare("stmt-loopcontrols");
+    }
+
+    /** 4.1.4 — namespace attribute writes persist across iterations
+     *  and scopes, and aliases share the namespace. */
+    @Test
+    public void namespaceMatches() {
+        HarnessTest.renderAndCompare("stmt-namespace");
+    }
+
+    /** 4.3.1 — control flow combined. */
+    @Test
+    public void controlFlowTortureMatches() {
+        HarnessTest.renderAndCompare("stmt-torture");
+    }
+
+    static boolean compileFails(String tpl) {
+        Environment env = heap Environment();
+        boolean threw = false;
+        try {
+            Template t #= env.compile(tpl);
+            threw = t == null;               // never
+        } catch (JinjaException e) {
+            threw = true;
+        }
+        return threw;
+    }
+
+    /** 4.1.6 — the stray-end-tag regression: nested constructs consume
+     *  their OWN terminators (the prototype's bug shape). */
+    @Test
+    public void terminatorsDoNotLeakNested() {
+        Environment env = heap Environment();
+        Template t #= env.compile(
+            "{% for i in [1] %}{% if true %}x{% endif %}y{% endfor %}z");
+        JsonValue ctx #= Json.parse("{}");
+        String out #= t.render(ctx);
+        Assert.isTrue(out.equals("xyz"));
+    }
+
+    /** 4.1.6 — unbalanced forms fail loudly at compile time. */
+    @Test
+    public void strayEndTagFails() {
+        Assert.isTrue(StmtTest.compileFails("{% endif %}"));
+    }
+
+    @Test
+    public void wrongEndTagFails() {
+        Assert.isTrue(StmtTest.compileFails("{% if true %}x{% endfor %}"));
+    }
+
+    @Test
+    public void unterminatedForFails() {
+        Assert.isTrue(StmtTest.compileFails("{% for i in [1] %}x"));
+    }
+
+    @Test
+    public void unterminatedIfFails() {
+        Assert.isTrue(StmtTest.compileFails("{% if true %}x"));
+    }
+
+    @Test
+    public void withClosedByEndifFails() {
+        Assert.isTrue(StmtTest.compileFails(
+            "{% with a = 1 %}x{% endif %}"));
+    }
+
+    /** Constructs outside Unit 4's set still fail loudly BY NAME. */
+    @Test
+    public void unsupportedStatementsFailLoudly() {
+        Assert.isTrue(StmtTest.compileFails(
+            "{% macro m() %}x{% endmacro %}"));
+        Assert.isTrue(StmtTest.compileFails(
+            "{% for i in [1] recursive %}x{% endfor %}"));
+        Assert.isTrue(StmtTest.compileFails("{% set a, b = 1 %}"));
+        Assert.isTrue(StmtTest.compileFails("{% raw %}x{% endraw %}"));
+    }
+
+    /** Unpack arity mismatches are render errors, as in Jinja. */
+    @Test
+    public void unpackMismatchFails() {
+        Environment env = heap Environment();
+        JsonValue ctx #= Json.parse("{}");
+        Template t #= env.compile(
+            "{% for a, b in [[1, 2, 3]] %}x{% endfor %}");
+        boolean threw = false;
+        try {
+            String out #= t.render(ctx);
+            threw = out == null;             // never
+        } catch (JinjaException e) {
+            threw = true;
+        }
+        Assert.isTrue(threw);
+
+        Template t2 #= env.compile(
+            "{% for i in 5 %}x{% endfor %}");
+        boolean threw2 = false;
+        try {
+            String out2 #= t2.render(ctx);
+            threw2 = out2 == null;           // never
+        } catch (JinjaException e2) {
+            threw2 = true;
+        }
+        Assert.isTrue(threw2);
+    }
+
+    /** Strict mode reaches into statements: iterating or branching on
+     *  undefined raises; a defined-but-empty loop stays fine. */
+    @Test
+    public void strictUndefinedInStatements() {
+        Environment env = heap Environment();
+        env.strictUndefined(true);
+        JsonValue ctx #= Json.parse("{}");
+
+        Template t #= env.compile("{% for i in missing %}x{% endfor %}");
+        boolean threw = false;
+        try {
+            String out #= t.render(ctx);
+            threw = out == null;             // never
+        } catch (JinjaException e) {
+            threw = true;
+        }
+        Assert.isTrue(threw);
+
+        Template t2 #= env.compile("{% if missing %}x{% endif %}");
+        boolean threw2 = false;
+        try {
+            String out2 #= t2.render(ctx);
+            threw2 = out2 == null;           // never
+        } catch (JinjaException e2) {
+            threw2 = true;
+        }
+        Assert.isTrue(threw2);
+    }
+
+    /** Scope frames drop their values when the frame pops — and a
+     *  value SET from a temporary concat survives into later reads
+     *  (spec 3.2, the Unit 4 face of 3.1.5). */
+    @Test
+    public void setValuesOwnTheirBytes() {
+        String got #= StmtTest.renderSetFromTemporaries();
+        int32 i = 0;
+        while (i < 8) {
+            String junk = "" + "JUNKJUNKJUNKJUNKJUNKJUNKJUNKJUNKJUNK" + i;
+            int8[] noise = heap int8[32];
+            noise[0] = (int8) junk.byteLength();
+            i = i + 1;
+        }
+        Assert.isTrue(got.equals(
+            "abcdefghijklmnopqrstuvwxyz0123456789!abcdefghijklmnopqrstuvwxyz0123456789!"));
+    }
+
+    static #String renderSetFromTemporaries() {
+        String name = "" + "abcdefghijklmnopqrstuvwxyz0123456789";
+        Environment env = heap Environment();
+        Template t #= env.compile(
+            "{% set v = tag ~ '!' %}{% for i in [1, 2] %}{{ v }}{% endfor %}");
+        String ctxText = "{\"tag\": \"" + name + "\"}";
+        JsonValue ctx #= Json.parse(ctxText);
+        return #t.render(ctx);
+    }
+}

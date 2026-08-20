@@ -1,0 +1,6 @@
+{% set x = 1 %}{% if true %}{% set x = 2 %}{% endif %}{{ x }}
+{% set y = 1 %}{% for i in [9] %}{% set y = 2 %}{{ y }}{% endfor %}{{ y }}
+{% for i in [1, 2] %}{% endfor %}[{{ i }}]|{% with a = 10 %}{{ a }}{% endwith %}[{{ a }}]
+{% set z = 1 %}{% with %}{% set z = 2 %}{{ z }}{% endwith %}{{ z }}
+{% set blk %}A{{ 1 + 1 }}B{% endset %}{{ blk }}|{{ blk }}
+{% for i in [1] %}{% if true %}{% set w = 5 %}{% endif %}{{ w }}{% endfor %}[{{ w }}]

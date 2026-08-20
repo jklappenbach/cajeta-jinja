@@ -48,10 +48,23 @@ final class Eval {
     Buf out;
     String lastUndef;        // last name that resolved to undefined
 
-    // scope frames above the context (Unit 4's set/for push here)
+    // scope frames above the context: for-iterations and with-blocks
+    // push; `if` never does (oracle-verified Jinja scoping)
     String[] names;
     JsonValue[] vals;
     int32 depth;
+    int32[] fbase;           // frame base stack; assign() binds in the
+    int32 fdepth;            //   CURRENT frame only, lookup walks all
+
+    // loopcontrols signals — cleared by the enclosing for
+    boolean brk;
+    boolean cont;
+
+    // namespace() registry: handles are {"__jinja_ns__": id} objects
+    // that COPY freely while the entry here stays shared — reference
+    // semantics under the copy discipline
+    JsonValue[] nsStore;
+    int32 nsN;
 
     Eval() {
         this.nd = null;
@@ -62,6 +75,37 @@ final class Eval {
         this.names = heap String[16];
         this.vals = heap JsonValue[16];
         this.depth = 0;
+        this.fbase = heap int32[8];
+        this.fbase[0] = 0;
+        this.fdepth = 1;
+        this.brk = false;
+        this.cont = false;
+        this.nsStore = heap JsonValue[4];
+        this.nsN = 0;
+    }
+
+    int32 beginScope() {
+        if (this.fdepth >= (int32) this.fbase.count()) {
+            int32[] nf = heap int32[this.fdepth * 2];
+            int32 i = 0;
+            while (i < this.fdepth) {
+                nf[i] = this.fbase[i];
+                i = i + 1;
+            }
+            this.fbase #= nf;
+        }
+        this.fbase[this.fdepth] = this.depth;
+        this.fdepth = this.fdepth + 1;
+        return this.depth;
+    }
+
+    void endScope(int32 mark) {
+        while (this.depth > mark) {
+            this.depth = this.depth - 1;
+            this.vals[this.depth] = null;
+            this.names[this.depth] = null;
+        }
+        this.fdepth = this.fdepth - 1;
     }
 
     // ── scope ──────────────────────────────────────────────────────────
@@ -86,9 +130,13 @@ final class Eval {
         this.depth = this.depth + 1;
     }
 
+    /** Rebind or create in the CURRENT frame only — `set` inside a
+     *  for-iteration or with-block shadows and then drops; `if` shares
+     *  its enclosing frame. */
     void assign(String name, #JsonValue v) {
+        int32 base = this.fbase[this.fdepth - 1];
         int32 i = this.depth - 1;
-        while (i >= 0) {
+        while (i >= base) {
             if (this.names[i].equals(name)) {
                 this.vals[i] #= v;
                 return;
@@ -114,35 +162,354 @@ final class Eval {
                 return #Eval.copy(got);
             }
         }
-        this.lastUndef = "" + name;
+        this.lastUndef #= "" + name;
         return null;
     }
 
     // ── rendering ──────────────────────────────────────────────────────
 
     #String render() {
-        int32 i = this.nd.root;
-        while (i >= 0) {
+        this.runChain(this.nd.root);
+        return #this.out.take();
+    }
+
+    /** Run a statement chain, stopping early when a break/continue
+     *  signal is in flight (the enclosing for clears it). */
+    void runChain(int32 head) {
+        int32 i = head;
+        while (i >= 0 && this.brk == false && this.cont == false) {
             this.exec(i);
             i = this.nd.nx(i);
         }
-        return #this.out.take();
     }
 
     void exec(int32 i) {
         int32 k = this.nd.k(i);
+        int32 line = this.nd.line(i);
         if (k == Node.N_TEXT) {
             this.out.addStr(this.nd.strOf(i));
             return;
         }
         if (k == Node.N_OUT) {
             JsonValue v #= this.eval(this.nd.a(i));
-            String s #= this.text(v, this.nd.line(i));
+            String s #= this.text(v, line);
             this.out.addStr(s);
             return;
         }
+        if (k == Node.N_IF) {
+            JsonValue c #= this.eval(this.nd.a(i));
+            if (this.truthy(c, line)) {
+                this.runChain(this.nd.b(i));
+            } else if (this.nd.c(i) >= 0) {
+                this.runChain(this.nd.c(i));
+            }
+            return;
+        }
+        if (k == Node.N_SET) {
+            this.execSet(i);
+            return;
+        }
+        if (k == Node.N_WITH) {
+            this.execWith(i);
+            return;
+        }
+        if (k == Node.N_FOR) {
+            this.execFor(i);
+            return;
+        }
+        if (k == Node.N_BREAK) {
+            this.brk = true;
+            return;
+        }
+        if (k == Node.N_CONTINUE) {
+            this.cont = true;
+            return;
+        }
         throw heap JinjaException("unhandled statement kind " + k
-            + " at line " + this.nd.line(i), this.nd.line(i), 0);
+            + " at line " + line, line, 0);
+    }
+
+    void execSet(int32 i) {
+        int32 line = this.nd.line(i);
+        String target = this.nd.strOf(i);
+        JsonValue v = null;
+        if (this.nd.a(i) >= 0) {
+            v #= this.eval(this.nd.a(i));
+        } else {
+            // Block form: capture the body's rendering as the value.
+            int32 mark = this.out.n;
+            this.runChain(this.nd.b(i));
+            int32 m = this.out.n - mark;
+            int8[] captured = heap int8[m];
+            int32 z = 0;
+            while (z < m) {
+                captured[z] = this.out.b[mark + z];
+                z = z + 1;
+            }
+            this.out.n = mark;
+            JsonValue sv = heap JsonValue();
+            sv.setStringOwned(#captured, m);
+            v #= sv;
+        }
+        int32 dot = target.indexOf(".");
+        if (dot < 0) {
+            this.assign(target, #v);
+            return;
+        }
+        // ns.attr — write through the namespace registry.
+        String base #= target.substring(0, dot);
+        String attr #= target.substring(dot + 1, target.byteLength());
+        JsonValue h #= this.lookup(base);
+        int32 id = this.nsIdOf(h);
+        if (id < 0) {
+            this.err("'" + base + "' is not a namespace; only "
+                + "namespace attributes are assignable", line);
+        }
+        if (v == null) {
+            v = heap JsonValue();
+            v.setNull();
+        }
+        this.nsWrite(id, attr, #v);
+    }
+
+    /** Replace-semantics write into a namespace entry. JsonObject.put
+     *  APPENDS (documented; a re-put key is unreachable via get), so
+     *  the entry is rebuilt without the old binding. Entries are a
+     *  handful of attrs; O(n) per write is nothing. */
+    void nsWrite(int32 id, String attr, #JsonValue v) {
+        JsonObject old = this.nsStore[id].object();
+        JsonObject fresh = heap JsonObject();
+        int32 j = 0;
+        while (j < old.count()) {
+            String key #= Eval.keyOf(old, j);
+            if (key.equals(attr) == false) {
+                Eval.putKey(fresh, key, Eval.copy(old.valueAt(j)));
+            }
+            j = j + 1;
+        }
+        Eval.putKey(fresh, attr, #v);
+        JsonValue nv = heap JsonValue();
+        nv.setObject(#fresh);
+        this.nsStore[id] #= nv;
+    }
+
+    void execWith(int32 i) {
+        // Assignments evaluate in the OUTER scope (oracle-verified:
+        // `{% with a = 1, b = a + 1 %}` fails on `a`).
+        int32 a = this.nd.a(i);
+        int32 count = 0;
+        int32 walk = a;
+        while (walk >= 0) {
+            count = count + 1;
+            walk = this.nd.nx(walk);
+        }
+        JsonValue[] pending = heap JsonValue[count];
+        int32 z = 0;
+        walk = a;
+        while (walk >= 0) {
+            pending[z] #= this.eval(this.nd.a(walk));
+            z = z + 1;
+            walk = this.nd.nx(walk);
+        }
+        int32 mark = this.beginScope();
+        z = 0;
+        walk = a;
+        while (walk >= 0) {
+            JsonValue pv #= pending[z];
+            if (pv == null) {
+                pv = heap JsonValue();
+                pv.setNull();
+            }
+            this.push(this.nd.strOf(walk), #pv);
+            z = z + 1;
+            walk = this.nd.nx(walk);
+        }
+        this.runChain(this.nd.b(i));
+        this.endScope(mark);
+    }
+
+    void execFor(int32 i) {
+        int32 line = this.nd.line(i);
+        JsonValue seq #= this.eval(this.nd.a(i));
+        JsonArray items #= this.materialize(seq, line);
+
+        // Split the name list once per execution.
+        String spec = this.nd.strOf(i);
+        int32 nameCount = this.nd.d(i);
+        String[] nm = heap String[nameCount];
+        int32 from = 0;
+        int32 ni = 0;
+        int32 sn = spec.byteLength();
+        int32 sx = 0;
+        while (sx <= sn) {
+            if (sx == sn || spec.byteAt(sx) == 44) {
+                nm[ni] #= spec.substring(from, sx);
+                ni = ni + 1;
+                from = sx + 1;
+            }
+            sx = sx + 1;
+        }
+
+        // Loop filter: evaluated with the loop variables bound but no
+        // `loop` object, over the RAW items; loop.* sees the filtered
+        // sequence.
+        int32 filter = this.nd.e(i);
+        if (filter >= 0) {
+            JsonArray kept = heap JsonArray();
+            int32 fi = 0;
+            while (fi < items.count()) {
+                int32 fmark = this.beginScope();
+                this.bindNames(nm, nameCount, items.get(fi), line);
+                JsonValue fv #= this.eval(filter);
+                boolean keep = this.truthy(fv, line);
+                this.endScope(fmark);
+                if (keep) {
+                    kept.add(Eval.copy(items.get(fi)));
+                }
+                fi = fi + 1;
+            }
+            items #= kept;
+        }
+
+        int32 n = items.count();
+        // for/else runs iff NO iteration ran the body to COMPLETION —
+        // break AND continue both skip the flag (Jinja's codegen, not
+        // Python's for/else; oracle-verified).
+        boolean completed = false;
+        int32 x = 0;
+        while (x < n) {
+            int32 mark = this.beginScope();
+            this.bindNames(nm, nameCount, items.get(x), line);
+            this.push("loop", #this.loopObject(items, x, n));
+            this.runChain(this.nd.b(i));
+            this.endScope(mark);
+            if (this.cont) {
+                this.cont = false;
+                x = x + 1;
+                continue;
+            }
+            if (this.brk) {
+                this.brk = false;
+                break;
+            }
+            completed = true;
+            x = x + 1;
+        }
+        if (completed == false && this.nd.c(i) >= 0) {
+            // The else arm is its own scope (a `set` there does not
+            // leak — oracle-verified), with no `loop` object.
+            int32 emark = this.beginScope();
+            this.runChain(this.nd.c(i));
+            this.endScope(emark);
+        }
+    }
+
+    /** Iterable -> owned item array. Arrays give elements, mappings
+     *  their keys, strings their (byte) characters; undefined iterates
+     *  EMPTY in default mode (oracle-verified) and raises in strict;
+     *  everything else is an error, as in Jinja. */
+    #JsonArray materialize(JsonValue seq, int32 line) {
+        JsonArray items = heap JsonArray();
+        if (seq == null) {
+            if (this.strict) {
+                this.undefErr(line);
+            }
+            return #items;
+        }
+        int32 k = seq.kind();
+        if (k == JsonValue.ARRAY) {
+            JsonArray src = seq.array();
+            int32 i = 0;
+            while (i < src.count()) {
+                items.add(Eval.copy(src.get(i)));
+                i = i + 1;
+            }
+            return #items;
+        }
+        if (k == JsonValue.OBJECT) {
+            JsonObject o = seq.object();
+            int32 j = 0;
+            while (j < o.count()) {
+                String key #= Eval.keyOf(o, j);
+                items.add(Eval.str(key));
+                j = j + 1;
+            }
+            return #items;
+        }
+        if (k == JsonValue.STRING) {
+            int8[] sb = seq.asBytes();
+            int32 n = seq.asBytesLength();
+            int32 i = 0;
+            while (i < n) {
+                int8[] one = heap int8[1];
+                one[0] = sb[i];
+                JsonValue cv = heap JsonValue();
+                cv.setStringOwned(#one, 1);
+                items.add(#cv);
+                i = i + 1;
+            }
+            return #items;
+        }
+        this.err("value is not iterable", line);
+        return #items;                       // unreachable
+    }
+
+    /** Bind the loop variable(s) for one item, unpacking when the
+     *  target list has several names. */
+    void bindNames(String[] nm, int32 count, JsonValue item,
+            int32 line) {
+        if (count == 1) {
+            this.push(nm[0], #Eval.copy(item));
+            return;
+        }
+        if (item == null || item.kind() != JsonValue.ARRAY
+                || item.array().count() != count) {
+            this.err("cannot unpack loop item into " + count
+                + " names", line);
+        }
+        JsonArray ia = item.array();
+        int32 j = 0;
+        while (j < count) {
+            this.push(nm[j], #Eval.copy(ia.get(j)));
+            j = j + 1;
+        }
+    }
+
+    /** The `loop` object for one iteration (spec 2.4): previtem and
+     *  nextitem are ABSENT keys at the edges, which member() turns
+     *  into undefined — exactly Jinja. `__jinja_loop__` marks it so
+     *  cycle() can find index0. */
+    #JsonValue loopObject(JsonArray items, int32 x, int32 n) {
+        JsonObject o = heap JsonObject();
+        Eval.putKey(o, "__jinja_loop__", Eval.bool(true));
+        Eval.putKey(o, "index", Eval.num((int64) x + 1));
+        Eval.putKey(o, "index0", Eval.num((int64) x));
+        Eval.putKey(o, "revindex", Eval.num((int64) (n - x)));
+        Eval.putKey(o, "revindex0", Eval.num((int64) (n - x - 1)));
+        Eval.putKey(o, "first", Eval.bool(x == 0));
+        Eval.putKey(o, "last", Eval.bool(x == n - 1));
+        Eval.putKey(o, "length", Eval.num((int64) n));
+        if (x > 0) {
+            Eval.putKey(o, "previtem", Eval.copy(items.get(x - 1)));
+        }
+        if (x < n - 1) {
+            Eval.putKey(o, "nextitem", Eval.copy(items.get(x + 1)));
+        }
+        JsonValue v = heap JsonValue();
+        v.setObject(#o);
+        return #v;
+    }
+
+    /** Namespace-handle id, or -1 when the value is not one. */
+    int32 nsIdOf(JsonValue v) {
+        if (v == null || v.kind() != JsonValue.OBJECT) {
+            return 0 - 1;
+        }
+        JsonValue idv = v.object().get("__jinja_ns__");
+        if (idv == null || idv.kind() != JsonValue.NUMBER) {
+            return 0 - 1;
+        }
+        return (int32) idv.asInt64();
     }
 
     // ── errors ─────────────────────────────────────────────────────────
@@ -1073,6 +1440,15 @@ final class Eval {
     }
 
     #JsonValue member(JsonValue o, String name) {
+        int32 nsId = this.nsIdOf(o);
+        if (nsId >= 0) {
+            JsonValue got = this.nsStore[nsId].object().get(name);
+            if (got != null) {
+                return #Eval.copy(got);
+            }
+            this.lastUndef #= "" + name;
+            return null;
+        }
         if (o.kind() == JsonValue.OBJECT) {
             JsonValue got = o.object().get(name);
             if (got != null) {
@@ -1080,7 +1456,7 @@ final class Eval {
             }
         }
         // Missing attribute -> undefined (lenient until USED).
-        this.lastUndef = "" + name;
+        this.lastUndef #= "" + name;
         return null;
     }
 
@@ -1276,6 +1652,45 @@ final class Eval {
             if (fn.equals("range")) {
                 return #this.evalRange(args, line);
             }
+            if (fn.equals("namespace")) {
+                // Registry entry holds the attrs; the returned HANDLE
+                // copies freely while writes go through the entry —
+                // reference semantics under the copy discipline.
+                JsonObject store = heap JsonObject();
+                int32 na = args;
+                while (na >= 0) {
+                    if (this.nd.k(na) != Node.E_KWARG) {
+                        this.err("namespace() takes keyword arguments",
+                            line);
+                    }
+                    JsonValue nav #= this.eval(this.nd.a(na));
+                    if (nav == null) {
+                        nav = heap JsonValue();
+                        nav.setNull();
+                    }
+                    Eval.putKey(store, this.nd.strOf(na), #nav);
+                    na = this.nd.nx(na);
+                }
+                JsonValue entry = heap JsonValue();
+                entry.setObject(#store);
+                if (this.nsN >= (int32) this.nsStore.count()) {
+                    JsonValue[] grown = heap JsonValue[this.nsN * 2];
+                    int32 g = 0;
+                    while (g < this.nsN) {
+                        grown[g] = this.nsStore[g];
+                        g = g + 1;
+                    }
+                    this.nsStore #= grown;
+                }
+                this.nsStore[this.nsN] #= entry;
+                JsonObject handle = heap JsonObject();
+                Eval.putKey(handle, "__jinja_ns__",
+                    Eval.num((int64) this.nsN));
+                this.nsN = this.nsN + 1;
+                JsonValue hv = heap JsonValue();
+                hv.setObject(#handle);
+                return #hv;
+            }
             if (fn.equals("dict")) {
                 JsonObject o = heap JsonObject();
                 int32 a = args;
@@ -1351,6 +1766,31 @@ final class Eval {
      *  the string/dict methods chat templates actually use. */
     #JsonValue callMethod(JsonValue obj, String m, int32 args,
             int32 line) {
+        if (m.equals("cycle") && obj.kind() == JsonValue.OBJECT
+                && obj.object().containsKey("__jinja_loop__")) {
+            JsonValue iv = obj.object().get("index0");
+            int64 idx = 0;
+            if (iv != null) {
+                idx = iv.asInt64();
+            }
+            int32 argc = 0;
+            int32 w = args;
+            while (w >= 0) {
+                argc = argc + 1;
+                w = this.nd.nx(w);
+            }
+            if (argc == 0) {
+                this.err("loop.cycle() needs at least one argument",
+                    line);
+            }
+            int32 pick = (int32) (idx % (int64) argc);
+            w = args;
+            while (pick > 0) {
+                w = this.nd.nx(w);
+                pick = pick - 1;
+            }
+            return #this.eval(w);
+        }
         if (m.equals("items") || m.equals("keys") || m.equals("values")) {
             if (obj.kind() != JsonValue.OBJECT) {
                 this.err("." + m + "() needs a mapping", line);

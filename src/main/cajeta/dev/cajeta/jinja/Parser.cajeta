@@ -30,19 +30,35 @@ final class Parser {
     Tok tk;
     Node nd;
     int32 p;               // token cursor
+    int32 loopDepth;       // for-body nesting; break/continue need > 0
+
+    // Terminator state set when parseBlock consumes a block-ender
+    // (`else`, `elif`, `endif`, `endfor`, `endwith`, `endset`). The
+    // elif condition lands in endExpr.
+    String endTag;
+    int32 endExpr;
 
     Parser() {
         this.tk = null;
-        this.nd = null;
+        // Created HERE, not in parse(): a fresh allocation must land in
+        // an owner's own frame; growth covers whatever the template
+        // needs beyond the initial capacity.
+        this.nd = heap Node(64);
         this.p = 0;
+        this.loopDepth = 0;
+        this.endTag = null;
+        this.endExpr = 0 - 1;
     }
 
     /** Parse the whole token stream into an owned node table. */
     static #Node parse(Tok tokens) {
         Parser ps = heap Parser();
         ps.tk = tokens;
-        ps.nd = heap Node(tokens.n + 16);
-        ps.nd.root = ps.parseTemplate();
+        ps.nd.root = ps.parseBlock();
+        if (ps.endTag != null) {
+            ps.fail("unexpected '{% " + ps.endTag
+                + " %}' outside any open block");
+        }
         return #ps.nd;
     }
 
@@ -123,9 +139,25 @@ final class Parser {
             + ", column " + this.curCol(), this.curLine(), this.curCol());
     }
 
-    // ── template level ─────────────────────────────────────────────────
+    // ── template / statement level ─────────────────────────────────────
 
-    int32 parseTemplate() {
+    /** Is the token after a STMT_OPEN one of the block-enders? */
+    boolean isEnderWord(int32 i) {
+        return this.wordIs(i, "endif") || this.wordIs(i, "endfor")
+            || this.wordIs(i, "endwith") || this.wordIs(i, "endset")
+            || this.wordIs(i, "else") || this.wordIs(i, "elif");
+    }
+
+    /**
+     * Parse statements until EOF or a block-ender. Returns the chain
+     * head; the terminator lands in endTag (elif's condition in
+     * endExpr). The 4.1.6 discipline lives here: a NESTED construct
+     * consumes its own terminator and this level CLEARS the state, so
+     * an inner endif can never surface as the outer block's end.
+     */
+    int32 parseBlock() {
+        this.endTag = null;
+        this.endExpr = 0 - 1;
         int32 head = 0 - 1;
         int32 tail = 0 - 1;
         while (this.cur() != Tok.K_EOF) {
@@ -144,16 +176,23 @@ final class Parser {
                 node = this.nd.add(Node.N_OUT, line);
                 this.nd.setA(node, e);
             } else if (k == Tok.K_STMT_OPEN) {
-                int32 line = this.curLine();
-                int32 col = this.curCol();
-                String kw = "?";
-                if (this.kindAt(this.p + 1) == Tok.K_NAME) {
-                    String kwName #= this.tk.spanText(this.p + 1);
-                    kw = "" + kwName;
+                if (this.isEnderWord(this.p + 1)) {
+                    this.p = this.p + 1;
+                    String ender #= this.tk.spanText(this.p);
+                    this.p = this.p + 1;
+                    this.endTag #= "" + ender;
+                    if (this.endTag.equals("elif")) {
+                        this.endExpr = this.parseExpr();
+                    }
+                    this.expect(Tok.K_STMT_CLOSE, "'%}'");
+                    return head;
                 }
-                throw heap JinjaException("unsupported construct '{% "
-                    + kw + " %}' at line " + line
-                    + ": statements land with Unit 4", line, col);
+                node = this.parseStatement();
+                // 4.1.6 — the nested construct consumed its OWN
+                // terminator; clearing it here is what keeps an inner
+                // endif/endfor from leaking to the enclosing block.
+                this.endTag = null;
+                this.endExpr = 0 - 1;
             } else {
                 this.fail("unexpected token in template");
             }
@@ -165,6 +204,240 @@ final class Parser {
             tail = node;
         }
         return head;
+    }
+
+    void expectEnd(String want, String opened, int32 line) {
+        if (this.endTag == null) {
+            throw heap JinjaException("'{% " + opened
+                + " %}' opened at line " + line
+                + " is never closed (expected '{% " + want + " %}')",
+                line, 0);
+        }
+        if (this.endTag.equals(want) == false) {
+            throw heap JinjaException("expected '{% " + want
+                + " %}' for the '{% " + opened + " %}' at line " + line,
+                line, 0);
+        }
+    }
+
+    /** Dispatch after STMT_OPEN on the keyword. */
+    int32 parseStatement() {
+        int32 line = this.curLine();
+        int32 col = this.curCol();
+        this.p = this.p + 1;                 // consume {%
+        if (this.cur() != Tok.K_NAME) {
+            this.fail("expected a statement keyword after '{%'");
+        }
+        if (this.atWord("if")) {
+            int32 cond = this.parseExpr();
+            this.expect(Tok.K_STMT_CLOSE, "'%}'");
+            return this.parseIf(cond, line);
+        }
+        if (this.atWord("for")) {
+            return this.parseFor(line);
+        }
+        if (this.atWord("set")) {
+            return this.parseSet(line);
+        }
+        if (this.atWord("with")) {
+            return this.parseWith(line);
+        }
+        if (this.atWord("break") || this.wordIs(this.p, "continue")) {
+            boolean isBreak = this.wordIs(this.p, "continue") == false;
+            if (isBreak == false) {
+                this.p = this.p + 1;
+            }
+            if (this.loopDepth == 0) {
+                String w = "continue";
+                if (isBreak) {
+                    w = "break";
+                }
+                throw heap JinjaException("'{% " + w
+                    + " %}' outside a loop at line " + line, line, col);
+            }
+            this.expect(Tok.K_STMT_CLOSE, "'%}'");
+            if (isBreak) {
+                return this.nd.add(Node.N_BREAK, line);
+            }
+            return this.nd.add(Node.N_CONTINUE, line);
+        }
+        String kw #= this.tk.spanText(this.p);
+        throw heap JinjaException("unsupported construct '{% " + kw
+            + " %}' at line " + line
+            + " (supported statements: if/elif/else, for, set, with, "
+            + "break, continue; macros/filter blocks/raw land with "
+            + "later units)", line, col);
+    }
+
+    /** `{% if cond %}` already consumed through its `%}`. */
+    int32 parseIf(int32 cond, int32 line) {
+        int32 node = this.nd.add(Node.N_IF, line);
+        this.nd.setA(node, cond);
+        int32 then = this.parseBlock();
+        this.nd.setB(node, then);
+        if (this.endTag == null) {
+            this.expectEnd("endif", "if", line);
+        }
+        if (this.endTag.equals("elif")) {
+            int32 sub = this.nd.add(Node.N_IF, this.curLine());
+            this.nd.setA(sub, this.endExpr);
+            this.nd.setC(node, sub);
+            this.finishIf(sub, line);
+            return node;
+        }
+        if (this.endTag.equals("else")) {
+            int32 els = this.parseBlock();
+            this.nd.setC(node, els);
+            this.expectEnd("endif", "if", line);
+            return node;
+        }
+        this.expectEnd("endif", "if", line);
+        return node;
+    }
+
+    /** Continue an elif chain: `sub` already carries its condition. */
+    void finishIf(int32 sub, int32 line) {
+        int32 then = this.parseBlock();
+        this.nd.setB(sub, then);
+        if (this.endTag == null) {
+            this.expectEnd("endif", "elif", line);
+        }
+        if (this.endTag.equals("elif")) {
+            int32 nxt = this.nd.add(Node.N_IF, this.curLine());
+            this.nd.setA(nxt, this.endExpr);
+            this.nd.setC(sub, nxt);
+            this.finishIf(nxt, line);
+            return;
+        }
+        if (this.endTag.equals("else")) {
+            int32 els = this.parseBlock();
+            this.nd.setC(sub, els);
+            this.expectEnd("endif", "elif", line);
+            return;
+        }
+        this.expectEnd("endif", "elif", line);
+    }
+
+    /** `{% for names in iter [if filter] %}` — the iterable parses at
+     *  the OR level so a trailing `if` is the LOOP FILTER, not an
+     *  inline conditional swallowing it (a conditional iterable needs
+     *  parens, exactly as in Jinja). */
+    int32 parseFor(int32 line) {
+        if (this.cur() != Tok.K_NAME) {
+            this.fail("expected a loop variable after '{% for'");
+        }
+        String names #= this.tk.spanText(this.p);
+        String acc = "" + names;
+        this.p = this.p + 1;
+        int32 count = 1;
+        while (this.atKind(Tok.K_COMMA)) {
+            if (this.cur() != Tok.K_NAME) {
+                this.fail("expected a name after ',' in '{% for %}'");
+            }
+            String n2 #= this.tk.spanText(this.p);
+            acc = acc + "," + n2;
+            this.p = this.p + 1;
+            count = count + 1;
+        }
+        if (this.atWord("in") == false) {
+            this.fail("expected 'in' in '{% for %}'");
+        }
+        int32 iter = this.parseOr();
+        int32 node = this.nd.add(Node.N_FOR, line);
+        this.nd.setA(node, iter);
+        this.nd.setStr(node, #acc);
+        this.nd.setD(node, count);
+        if (this.atWord("if")) {
+            this.nd.setE(node, this.parseExpr());
+        }
+        if (this.wordIs(this.p, "recursive")) {
+            this.fail("unsupported construct: '{% for ... recursive %}'");
+        }
+        this.expect(Tok.K_STMT_CLOSE, "'%}'");
+        this.loopDepth = this.loopDepth + 1;
+        int32 body = this.parseBlock();
+        this.loopDepth = this.loopDepth - 1;
+        this.nd.setB(node, body);
+        if (this.endTag != null && this.endTag.equals("else")) {
+            int32 els = this.parseBlock();
+            this.nd.setC(node, els);
+        }
+        this.expectEnd("endfor", "for", line);
+        return node;
+    }
+
+    /** `{% set x = expr %}`, `{% set ns.attr = expr %}`, or the block
+     *  form `{% set x %}...{% endset %}`. */
+    int32 parseSet(int32 line) {
+        if (this.cur() != Tok.K_NAME) {
+            this.fail("expected a name after '{% set'");
+        }
+        String target #= this.tk.spanText(this.p);
+        String full = "" + target;
+        this.p = this.p + 1;
+        if (this.cur() == Tok.K_COMMA) {
+            this.fail("unsupported construct: tuple assignment in "
+                + "'{% set %}'");
+        }
+        if (this.atKind(Tok.K_DOT)) {
+            if (this.cur() != Tok.K_NAME) {
+                this.fail("expected an attribute name after '.' in "
+                    + "'{% set %}'");
+            }
+            String attr #= this.tk.spanText(this.p);
+            full = full + "." + attr;
+            this.p = this.p + 1;
+            if (this.cur() == Tok.K_DOT) {
+                this.fail("only one attribute level is assignable in "
+                    + "'{% set %}'");
+            }
+        }
+        int32 node = this.nd.add(Node.N_SET, line);
+        this.nd.setStr(node, #full);
+        if (this.atKind(Tok.K_ASSIGN)) {
+            this.nd.setA(node, this.parseExpr());
+            this.expect(Tok.K_STMT_CLOSE, "'%}'");
+            return node;
+        }
+        // Block form: {% set x %}body{% endset %}
+        this.expect(Tok.K_STMT_CLOSE, "'%}'");
+        int32 body = this.parseBlock();
+        this.nd.setB(node, body);
+        this.expectEnd("endset", "set", line);
+        return node;
+    }
+
+    /** `{% with [name = expr (, name = expr)*] %}` — assignments
+     *  chained as E_KWARG nodes, evaluated in the OUTER scope. */
+    int32 parseWith(int32 line) {
+        int32 node = this.nd.add(Node.N_WITH, line);
+        int32 head = 0 - 1;
+        int32 tail = 0 - 1;
+        while (this.cur() == Tok.K_NAME) {
+            int32 kw = this.nd.add(Node.E_KWARG, this.curLine());
+            String nm #= this.tk.spanText(this.p);
+            this.nd.setStr(kw, #nm);
+            this.p = this.p + 1;
+            if (this.atKind(Tok.K_ASSIGN) == false) {
+                this.fail("expected '=' in '{% with %}' assignment");
+            }
+            this.nd.setA(kw, this.parseExpr());
+            if (tail < 0) {
+                head = kw;
+            } else {
+                this.nd.setNx(tail, kw);
+            }
+            tail = kw;
+            if (this.atKind(Tok.K_COMMA) == false) {
+                break;
+            }
+        }
+        this.expect(Tok.K_STMT_CLOSE, "'%}'");
+        this.nd.setA(node, head);
+        int32 body = this.parseBlock();
+        this.nd.setB(node, body);
+        this.expectEnd("endwith", "with", line);
+        return node;
     }
 
     // ── expressions, loosest to tightest ───────────────────────────────

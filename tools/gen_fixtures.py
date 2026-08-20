@@ -43,6 +43,9 @@ FIXTURES = ROOT / "src" / "test" / "fixtures"
 
 def build_env(settings: dict) -> jinja2.Environment:
     env = jinja2.Environment(
+        # transformers enables loopcontrols; the engine always supports
+        # break/continue (spec 2.11), so the oracle must too.
+        extensions=["jinja2.ext.loopcontrols"],
         trim_blocks=settings.get("trim_blocks", False),
         lstrip_blocks=settings.get("lstrip_blocks", False),
         autoescape=settings.get("autoescape", False),

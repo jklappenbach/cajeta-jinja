@@ -1,0 +1,3 @@
+{% set ns = namespace(found=false, n=0) %}{% for i in [1, 2, 3] %}{% set ns.n = ns.n + i %}{% if i == 2 %}{% set ns.found = true %}{% endif %}{% endfor %}{{ ns.found }}/{{ ns.n }}
+{% set n1 = namespace(v=1) %}{% set n2 = n1 %}{% set n2.v = 9 %}{{ n1.v }}
+{% set ns2 = namespace(v=1) %}{% with %}{% set ns2.v = 2 %}{% endwith %}{{ ns2.v }}

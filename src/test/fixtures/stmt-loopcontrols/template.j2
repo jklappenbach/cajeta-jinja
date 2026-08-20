@@ -1,0 +1,6 @@
+{% for i in range(5) %}{% if i == 2 %}{% continue %}{% endif %}{{ i }}{% endfor %}
+{% for i in range(5) %}{% if i == 3 %}{% break %}{% endif %}{{ i }}{% endfor %}
+{% for i in range(5) %}{{ i }}{% if i == 1 %}{% break %}{% endif %}{% else %}E{% endfor %}|
+{% for i in range(5) %}{{ i }}{% break %}{% else %}E{% endfor %}|
+{% for i in [1, 2] %}{% continue %}{% else %}E{% endfor %}|
+{% for i in range(6) if i > 2 %}{{ i }}{% break %}{% endfor %}

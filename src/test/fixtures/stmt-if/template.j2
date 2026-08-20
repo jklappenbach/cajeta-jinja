@@ -1,0 +1,3 @@
+{% if a == 1 %}one{% elif a == 2 %}two{% elif a == 3 %}three{% else %}many{% endif %}
+{% if items %}have-items{% else %}empty{% endif %}|{% if '' %}t{% else %}f{% endif %}|{% if 0.0 %}t{% else %}f{% endif %}
+{% if missing %}t{% else %}undef-is-falsy{% endif %}{% if nested.flag %}|nested-true{% endif %}
