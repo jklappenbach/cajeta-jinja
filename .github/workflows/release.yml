@@ -25,7 +25,7 @@ jobs:
       #     tojson fixtures fail byte-compare without it).
       # If the next toolchain release ships under a different number, bump
       # this pin to it — the intent is "first release containing both".
-      cajeta-version: v0.21.1
+      cajeta-version: v0.26.0
       # The full oracle suite: fixture corpus byte-compared against
       # Jinja2-generated references (committed), plus the direct
       # error-path and ownership tests.

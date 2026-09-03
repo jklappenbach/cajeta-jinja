@@ -14,7 +14,7 @@
 
     "details": {
         "name":               "dev.cajeta.jinja",
-        "version":            "0.1.0",
+        "version":            "0.1.1",
         "description":        "cajeta-jinja — Jinja2-compatible template engine: lexer, parser, interpreter, filters/tests, JsonValue context",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
@@ -37,7 +37,7 @@
         // checkout, then store, then a sha256-verified Olla fetch at
         // this pin).
         "dev-dependencies": {
-            "dev.cajeta.unit": "0.2.2"
+            "dev.cajeta.unit": "0.2.4"
         },
 
         "repositories": [
