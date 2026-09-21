@@ -14,7 +14,7 @@
 
     "details": {
         "name":               "dev.cajeta.jinja",
-        "version":            "0.1.1",
+        "version":            "0.1.2",
         "description":        "cajeta-jinja — Jinja2-compatible template engine: lexer, parser, interpreter, filters/tests, JsonValue context",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
