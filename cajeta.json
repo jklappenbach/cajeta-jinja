@@ -36,8 +36,18 @@
         // discovery; run-tests.sh resolves the archive (sibling
         // checkout, then store, then a sha256-verified Olla fetch at
         // this pin).
+        //
+        // Raised 0.2.4 -> 0.3.0 in the 2026-09-21 fleet sweep, and this
+        // one is a hard requirement rather than hygiene. A consumer's
+        // compiler re-checks a dependency archive's OWN sources, so the
+        // 0.2.4 blob is re-checked by whichever cajeta we install.
+        // Measured here on v0.29.0 against the published 0.2.4 blob: the
+        // test binary does not link, on CAJETA_ERROR_CAPTURED_BORROW_PARAM
+        // over cajeta-unit's own `pred` field, a symbol this repo does not
+        // contain. 0.3.0 is the first cajeta-unit cut by a toolchain that
+        // carries that check, and it resolves clean.
         "dev-dependencies": {
-            "dev.cajeta.unit": "0.2.4"
+            "dev.cajeta.unit": "0.3.0"
         },
 
         "repositories": [

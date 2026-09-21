@@ -39,6 +39,12 @@ jobs:
       # a five line program that imports nothing from it. Rebuilding on
       # the current toolchain is what keeps cajeta-llama and cajeta-http
       # able to build against us.
+      #
+      # That is also why this pin and the dev.cajeta.unit peg move
+      # together. Held at 0.2.4 the gate was red on v0.29.0 for exactly
+      # the reason above, and the fix was not ours to make. The peg now
+      # points at 0.3.0, the first cajeta-unit cut by a toolchain that
+      # has the check, and the suite is green again.
       cajeta-version: v0.29.0
       # The full oracle suite: fixture corpus byte-compared against
       # Jinja2-generated references (committed), plus the direct
