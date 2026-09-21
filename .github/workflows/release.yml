@@ -25,7 +25,21 @@ jobs:
       #     tojson fixtures fail byte-compare without it).
       # If the next toolchain release ships under a different number, bump
       # this pin to it — the intent is "first release containing both".
-      cajeta-version: v0.26.0
+      #
+      # Raised to v0.29.0 in the 2026-09-20 fleet sweep. Nothing in this
+      # library's own sources needs the new floor, and that was checked
+      # rather than assumed. The suite builds and passes on the old pin
+      # and on v0.29.0 alike, so we are not reaching for a fix we consume.
+      # The reason to move is that a published .cja is re-checked by
+      # whichever compiler the CONSUMER installs, never by the one that
+      # built it, so a check added after our cut can reject an archive
+      # that was green the day it shipped. That was measured here, not
+      # reasoned about. v0.28.0 added CAJETA_ERROR_CAPTURED_BORROW_PARAM,
+      # and it rejects the published dev.cajeta.unit 0.2.4 archive out of
+      # a five line program that imports nothing from it. Rebuilding on
+      # the current toolchain is what keeps cajeta-llama and cajeta-http
+      # able to build against us.
+      cajeta-version: v0.29.0
       # The full oracle suite: fixture corpus byte-compared against
       # Jinja2-generated references (committed), plus the direct
       # error-path and ownership tests.
