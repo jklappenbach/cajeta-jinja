@@ -135,12 +135,12 @@ public class HarnessTest {
      *  the round-trip itself). */
     @Test
     public void settingsRoundTrip() {
-        Environment env = heap Environment()
-            .trimBlocks(true)
-            .lstripBlocks(true)
-            .autoescape(true)
-            .strictUndefined(true)
-            .nowEpochSeconds((int64) 1755600000);
+        Environment env = heap Environment();
+        env.trimBlocks(true);
+        env.lstripBlocks(true);
+        env.autoescape(true);
+        env.strictUndefined(true);
+        env.nowEpochSeconds((int64) 1755600000);
         Assert.isTrue(env.isTrimBlocks());
         Assert.isTrue(env.isLstripBlocks());
         Assert.isTrue(env.isAutoescape());
