@@ -141,7 +141,7 @@ final class Eval {
             int32[] ni = heap int32[this.macroN * 2];
             int32 i = 0;
             while (i < this.macroN) {
-                nn[i] = this.macroNames[i];
+                nn[i] #= this.macroNames[i];
                 ni[i] = this.macroNodes[i];
                 i = i + 1;
             }
@@ -187,8 +187,8 @@ final class Eval {
             JsonValue[] nv = heap JsonValue[cap];
             int32 i = 0;
             while (i < this.depth) {
-                nn[i] = this.names[i];
-                nv[i] = this.vals[i];
+                nn[i] #= this.names[i];
+                nv[i] #= this.vals[i];
                 i = i + 1;
             }
             this.names #= nn;
@@ -323,7 +323,7 @@ final class Eval {
             JsonValue[] grown = heap JsonValue[this.nsN * 2];
             int32 g = 0;
             while (g < this.nsN) {
-                grown[g] = this.nsStore[g];
+                grown[g] #= this.nsStore[g];
                 g = g + 1;
             }
             this.nsStore #= grown;
@@ -2142,7 +2142,7 @@ final class Eval {
                     JsonValue[] grown = heap JsonValue[this.nsN * 2];
                     int32 g = 0;
                     while (g < this.nsN) {
-                        grown[g] = this.nsStore[g];
+                        grown[g] #= this.nsStore[g];
                         g = g + 1;
                     }
                     this.nsStore #= grown;

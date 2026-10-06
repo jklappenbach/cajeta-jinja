@@ -23,8 +23,8 @@ public final class MapLoader implements JinjaLoader {
             String[] ns = heap String[this.n * 2];
             int32 i = 0;
             while (i < this.n) {
-                nn[i] = this.names[i];
-                ns[i] = this.sources[i];
+                nn[i] #= this.names[i];
+                ns[i] #= this.sources[i];
                 i = i + 1;
             }
             this.names #= nn;

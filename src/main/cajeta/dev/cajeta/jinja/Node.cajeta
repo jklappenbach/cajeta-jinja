@@ -106,7 +106,7 @@ final class Node {
             }
             i = 0;
             while (i < this.n) {
-                ns[i] = this.str[i];
+                ns[i] #= this.str[i];
                 i = i + 1;
             }
             this.f #= nf;
