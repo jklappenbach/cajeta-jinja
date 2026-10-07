@@ -14,7 +14,7 @@
 
     "details": {
         "name":               "dev.cajeta.jinja",
-        "version":            "0.1.3",
+        "version":            "0.1.4",
         "description":        "cajeta-jinja — Jinja2-compatible template engine: lexer, parser, interpreter, filters/tests, JsonValue context",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
@@ -47,9 +47,9 @@
         // contain. 0.3.0 is the first cajeta-unit cut by a toolchain that
         // carries that check, and it resolves clean.
         //
-        // Raised to 0.3.3 in the 2026-10-06 sweep, the cut on cajeta v0.35.0.
+        // Raised to 0.3.4 in the 2026-10-07 sweep, the cut on cajeta v0.36.0.
         "dev-dependencies": {
-            "dev.cajeta.unit": "0.3.3"
+            "dev.cajeta.unit": "0.3.4"
         },
 
         "repositories": [
