@@ -47,7 +47,8 @@ jobs:
       # has the check, and the suite is green again.
       #
       # Raised to v0.36.0 in the 2026-10-07 sweep.
-      cajeta-version: v0.36.0
+      # Raised to v0.38.0 in the 2026-10-09 sweep.
+      cajeta-version: v0.38.0
       # The full oracle suite: fixture corpus byte-compared against
       # Jinja2-generated references (committed), plus the direct
       # error-path and ownership tests.
